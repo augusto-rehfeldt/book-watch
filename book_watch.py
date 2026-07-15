@@ -27,7 +27,7 @@ from urllib.parse import quote_plus, urlencode
 from urllib.request import Request, urlopen
 
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 ROOT = Path(__file__).resolve().parent
 DEFAULT_CONFIG = ROOT / "config.toml"
 STATE_SCHEMA = """
@@ -308,6 +308,7 @@ def build_catalog(raw_books: list[dict[str, Any]]) -> dict[str, Any]:
     signatures: set[tuple[str, str]] = set()
     author_counts: dict[str, list[Any]] = {}
     author_titles: dict[str, set[str]] = {}
+    tag_counts: dict[str, list[Any]] = {}
     series: dict[str, dict[str, Any]] = {}
     for raw in raw_books:
         authors = split_authors(raw.get("authors"))
@@ -322,6 +323,11 @@ def build_catalog(raw_books: list[dict[str, Any]]) -> dict[str, Any]:
         book = {**raw, "authors_list": authors, "isbns_set": book_isbns}
         books.append(book)
         isbns.update(book_isbns)
+        raw_tags = raw.get("tags") or []
+        for tag in raw_tags if isinstance(raw_tags, list) else str(raw_tags).split(","):
+            tag = str(tag).strip()
+            if tag:
+                tag_counts.setdefault(normalize(tag), [tag, 0])[1] += 1
         for author in authors:
             key = normalize(author)
             if not key:
@@ -342,6 +348,7 @@ def build_catalog(raw_books: list[dict[str, Any]]) -> dict[str, Any]:
         "signatures": signatures,
         "author_counts": author_counts,
         "author_titles": author_titles,
+        "tag_counts": tag_counts,
         "series": series,
     }
 
@@ -375,7 +382,7 @@ def cached_request(
     if wait > 0:
         time.sleep(wait)
     body = json.dumps(payload).encode("utf-8") if payload is not None else None
-    request_headers = {"User-Agent": f"CalibreBookWatch/{VERSION} (personal library report)"}
+    request_headers = {"User-Agent": f"CalibreBookRecommender/{VERSION} (personal library report)"}
     request_headers.update(headers or {})
     if payload is not None:
         request_headers["Content-Type"] = "application/json"
@@ -576,7 +583,7 @@ def open_library_candidates(
     results: list[Candidate] = []
     cache_hours = int(config["sources"].get("cache_hours", 24))
     contact = str(config.get("open_library", {}).get("contact_email") or "").strip()
-    headers = {"User-Agent": f"CalibreBookWatch/{VERSION} ({contact})"} if contact else None
+    headers = {"User-Agent": f"CalibreBookRecommender/{VERSION} ({contact})"} if contact else None
     fields = "key,title,subtitle,author_name,first_publish_year,publish_date,isbn,cover_i,subject,series,publisher,language"
     for label, field_name, query in queries:
         params = {field_name: query, "language": "eng", "lang": "en", "sort": "new", "limit": 40, "fields": fields}
@@ -1081,6 +1088,17 @@ def enrich_with_openrouter(candidates: list[Candidate], config: dict[str, Any], 
     if not selected:
         return "AI skipped: no eligible candidates"
     taste = config.get("taste", {})
+    library_profile = {
+        "book_count": len((catalog or {}).get("books", [])),
+        "top_tags": [
+            item[0]
+            for item in sorted((catalog or {}).get("tag_counts", {}).values(), key=lambda item: item[1], reverse=True)[:20]
+        ],
+        "top_authors": [
+            {"name": item[0], "owned_books": item[1]}
+            for item in sorted((catalog or {}).get("author_counts", {}).values(), key=lambda item: item[1], reverse=True)[:20]
+        ],
+    }
     base_url = str(ai_cfg.get("base_url", "https://openrouter.ai/api/v1")).rstrip("/")
     models = list(dict.fromkeys(str(value) for value in (ai_cfg.get("model"), ai_cfg.get("fallback_model")) if value))
     applied_total = 0
@@ -1115,13 +1133,16 @@ def enrich_with_openrouter(candidates: list[Candidate], config: dict[str, Any], 
                 "owned_titles": owned_titles[item.key],
             })
         prompt = (
-            "You curate a private speculative-fiction release report. Classify and rank only the supplied candidates. "
+            "You rank new releases for a private book recommender. Judge how strongly each candidate matches either the "
+            "explicit genre preferences (highest priority) or patterns in the user's Calibre library. "
+            "Classify and rank only the supplied candidates. "
             "The input list is authoritative: return exactly one entry per input with the same rank, id, and title, "
             "and never introduce another book. Do not invent publication facts or series membership. Return JSON only with this shape: "
             '{"items":[{"rank":0,"id":"work:...","title":"...","fit_score":0,"genres":["..."],"why":"one concise sentence","concerns":["..."],"owned_title":null}]}. '
             "fit_score must be an integer from 0 to 100. Concerns should flag weak metadata, likely reissues, or genre uncertainty. "
             "Set owned_title to an exact value from that candidate's owned_titles only when it is the same underlying work under a translation, retitle, or reissue; otherwise use null.\n\n"
-            f"Taste profile: {json.dumps(taste, ensure_ascii=False)}\n\n"
+            f"Genre preferences: {json.dumps(taste, ensure_ascii=False)}\n\n"
+            f"Aggregate Calibre profile: {json.dumps(library_profile, ensure_ascii=False)}\n\n"
             f"Candidates: {json.dumps(items, ensure_ascii=False)}"
         )
         attempt_models = (models * 3)[:3]
@@ -1139,7 +1160,7 @@ def enrich_with_openrouter(candidates: list[Candidate], config: dict[str, Any], 
                     "Authorization": f"Bearer {key}",
                     "Content-Type": "application/json",
                     "HTTP-Referer": "https://localhost/calibre-book-watch",
-                    "X-Title": "Calibre Book Watch",
+                    "X-Title": "Calibre Book Recommender",
                 },
                 method="POST",
             )
@@ -1307,7 +1328,7 @@ def render_report(
     notes = "".join(f"<li>{html.escape(redact_secrets(note))}</li>" for note in source_notes)
     body = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Calibre Book Watch — {report_day.isoformat()}</title>
+<title>Calibre Book Recommender — {report_day.isoformat()}</title>
 <style>
 :root{{--bg:#f2f0ea;--paper:#fff;--ink:#18201d;--muted:#64706b;--accent:#176b5b;--accent-soft:#e4f1ed;--line:#d8ddd8;--warn:#98502e}}
 *{{box-sizing:border-box}} body{{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 system-ui,-apple-system,sans-serif}}
@@ -1334,10 +1355,10 @@ dialog{{width:min(920px,calc(100% - 28px));height:min(700px,90vh);overflow:hidde
 details{{margin-top:44px;background:var(--paper);border:1px solid var(--line);padding:14px;border-radius:10px}} .sr-only{{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}}
 @media (max-width:650px){{main{{padding:24px 14px 60px}} .gallery{{grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}} .book-card{{height:390px}} .filters{{position:static}} #result-count{{width:100%;margin:0}} .modal-book{{grid-template-columns:1fr;grid-template-rows:42% minmax(0,1fr)}} .modal-copy{{padding:28px 22px}} .modal-score{{top:28px;right:22px}}}}
 </style></head><body><main>
-<header><div class="muted">Daily release intelligence · {report_day.isoformat()}</div><h1>Calibre Book Watch</h1><p>Read-only comparison of external release data with your Calibre catalog.</p></header>
+<header><div class="muted">AI-assisted release recommendations · {report_day.isoformat()}</div><h1>Calibre Book Recommender</h1><p>New books matched to your library and genre preferences.</p></header>
 <p class="muted">Card badge = relevance score (higher is a stronger match), not a list index.</p>
 <div class="summary"><div><strong>{catalog_count:,}</strong>Calibre books</div><div><strong>{screened:,}</strong>external records screened</div><div><strong>{owned_suppressed:,}</strong>already-owned records suppressed</div><div><strong>{len(visible):,}</strong>report items</div><div><strong>{len(series):,}</strong>series alerts</div></div>
-<p><strong>Authors queried:</strong> {html.escape(', '.join(authors) or 'none')}<br><strong>Series queried:</strong> {html.escape(', '.join(series_queries) or 'none')}</p>
+<p><strong>Genre preferences:</strong> {html.escape(', '.join(config.get('taste', {}).get('include', [])) or 'none')}<br><strong>Authors queried:</strong> {html.escape(', '.join(authors) or 'none')}<br><strong>Series queried:</strong> {html.escape(', '.join(series_queries) or 'none')}</p>
 <div class="filters"><label><span class="sr-only">Search books</span><input id="book-search" type="search" placeholder="Search title, author, series, genre…"></label>
 <div class="filter-buttons" role="group" aria-label="Book category"><button class="filter" type="button" data-filter="all" aria-pressed="true">All {len(visible)}</button><button class="filter" type="button" data-filter="series" aria-pressed="false">Series {len(series)}</button><button class="filter" type="button" data-filter="author" aria-pressed="false">Authors {len(authors_section)}</button><button class="filter" type="button" data-filter="discovery" aria-pressed="false">Discovery {len(discovery)}</button></div><strong id="result-count" aria-live="polite">{len(visible)} books</strong></div>
 {section('Series continuations', series, 'No unowned series continuation was confidently identified in this run.', 'series')}
@@ -1613,17 +1634,19 @@ def run_report(args: argparse.Namespace) -> int:
         catalog = build_catalog(raw_books)
         authors = select_authors(conn, catalog, config, args.author or [], args.max_authors)
         series_queries = list(args.series or []) + list(config.get("watch", {}).get("ongoing_series", []))
-        progress(f"Selected {len(authors)} author and {len(series_queries)} series queries")
-        focused = bool(args.focused)
+        genres = list(dict.fromkeys(value.strip() for value in (args.genre or []) if value.strip()))
+        if genres:
+            config.setdefault("taste", {})["include"] = genres
+        progress(f"Selected {len(authors)} author, {len(series_queries)} series, and {len(genres)} explicit genre queries")
         sources = config["sources"]
+        query_genres = genres or ([] if args.focused else list(sources.get("subjects", [])))
         source_notes: list[str] = []
         collected: list[Candidate] = []
 
         if not args.no_network and sources.get("google_books", True):
             queries = [(f"author: {author}", f'inauthor:"{author}"') for author in authors]
             queries += [(f"series: {series}", f'"{series}"') for series in series_queries]
-            if not focused:
-                queries += [(f"subject: {subject}", f'subject:"{subject}"') for subject in sources.get("subjects", [])]
+            queries += [(f"subject: {subject}", f'subject:"{subject}"') for subject in query_genres]
             progress(f"Google Books: running {len(queries)} queries...")
             try:
                 found, errors = google_candidates(conn, config, queries, args.refresh)
@@ -1638,8 +1661,7 @@ def run_report(args: argparse.Namespace) -> int:
         if not args.no_network and sources.get("open_library", True):
             queries_ol = [(f"author: {author}", "author", author) for author in authors]
             queries_ol += [(f"series: {series}", "q", series) for series in series_queries]
-            if not focused:
-                queries_ol += [(f"subject: {subject}", "subject", subject) for subject in sources.get("subjects", [])]
+            queries_ol += [(f"subject: {subject}", "subject", subject) for subject in query_genres]
             progress(f"Open Library: running {len(queries_ol)} queries...")
             try:
                 found = open_library_candidates(conn, config, queries_ol, args.refresh)
@@ -1712,6 +1734,7 @@ def run_report(args: argparse.Namespace) -> int:
         conn.commit()
         visible = [item for item in candidates if not item.owned and item.decision != "dismiss" and item.score > -10]
         print(f"Catalog: {len(raw_books):,} books ({catalog_status})")
+        print(f"Genre preferences: {', '.join(config.get('taste', {}).get('include', [])) or 'none'}")
         print(f"Authors checked: {', '.join(authors)}")
         print(
             f"Candidates: {len(candidates):,} screened; {sum(item.owned for item in candidates):,} already owned; "
@@ -1764,12 +1787,13 @@ def self_test() -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Create a curated release report from a Calibre library.")
+    parser = argparse.ArgumentParser(description="Recommend new books from a Calibre library and genre preferences.")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG), help="Path to config.toml")
     sub = parser.add_subparsers(dest="command")
     run = sub.add_parser("run", help="Build a report")
     run.add_argument("--author", action="append", help="Focus on an owned author; repeatable")
     run.add_argument("--series", action="append", help="Focus on an owned series; repeatable")
+    run.add_argument("-g", "--genre", action="append", help="Steer discovery and AI ranking toward a genre; repeatable")
     run.add_argument("--max-authors", type=int, help="Override the rotating author count")
     run.add_argument("--focused", action="store_true", help="Skip general subject API queries")
     run.add_argument("--no-ai", action="store_true")

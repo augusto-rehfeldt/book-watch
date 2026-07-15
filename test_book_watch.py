@@ -82,10 +82,17 @@ class BookWatchTests(unittest.TestCase):
         with patch.dict(os.environ, {"BOOK_WATCH_TEST_AI_KEY": "test-key"}), patch.object(
             bw, "open_json_with_deadline", side_effect=responses
         ) as request:
-            status = bw.enrich_with_openrouter(candidates, config)
+            catalog = bw.build_catalog([{"title": "Owned", "authors": "A. Writer", "tags": ["Science Fiction"]}])
+            status = bw.enrich_with_openrouter(candidates, config, catalog)
         self.assertEqual(request.call_count, 2)
         self.assertTrue(all(candidate.ai for candidate in candidates))
         self.assertIn("13/13", status)
+        prompt = json.loads(request.call_args_list[0].args[0].data)["messages"][0]["content"]
+        self.assertIn('"top_tags": ["Science Fiction"]', prompt)
+
+    def test_genre_option_is_repeatable(self):
+        args = bw.build_parser().parse_args(["run", "--genre", "cozy fantasy", "-g", "mystery"])
+        self.assertEqual(args.genre, ["cozy fantasy", "mystery"])
 
     def test_openrouter_retries_a_failed_batch_three_times(self):
         candidate = bw.Candidate("Book", ["A. Writer"])

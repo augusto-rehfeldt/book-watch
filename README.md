@@ -1,8 +1,8 @@
-# Calibre Book Watch
+# Calibre Book Recommender
 
-Calibre Book Watch builds a local HTML report of recently released English-language books that match your Calibre library, favorite authors, series, and genres.
+Calibre Book Recommender builds a local HTML report of recently released English-language books that match your Calibre library and the genres you want right now.
 
-It reads Calibre through `calibredb` and never changes the library. Book data comes from Google Books, Open Library, Hardcover, and Reactor. OpenRouter can optionally improve ranking and detect translated or retitled books you already own.
+It reads Calibre through `calibredb` and never changes the library. Book data comes from Google Books, Open Library, Hardcover, and Reactor. OpenRouter can optionally rank releases using your chosen genres plus aggregate signals from your library's tags and authors, and detect translated or retitled books you already own.
 
 ## Requirements
 
@@ -42,6 +42,10 @@ OPENROUTER_API_KEY=...
 # Normal report
 python book_watch.py run
 
+# Steer discovery and AI ranking toward one or more genres
+python book_watch.py run --genre "cozy fantasy"
+python book_watch.py run --genre "historical fiction" --genre mystery
+
 # Check particular authors or series without general genre searches
 python book_watch.py run --focused --author "Adrian Tchaikovsky" --series "Children of Time"
 
@@ -64,9 +68,9 @@ Run `python book_watch.py --help` or `python book_watch.py run --help` for every
 
 ## Data and privacy
 
-Generated reports, the cached Calibre snapshot, HTTP responses, decisions, and run history stay under `reports/` and `data/`; both directories are ignored by Git. If Calibre is open or unavailable, Book Watch uses the last successful snapshot.
+Generated reports, the cached Calibre snapshot, HTTP responses, decisions, and run history stay under `reports/` and `data/`; both directories are ignored by Git. If Calibre is open or unavailable, the recommender uses the last successful snapshot.
 
-OpenRouter receives candidate metadata and publisher descriptions only. It does not receive book files, Calibre paths, or personal notes.
+OpenRouter receives candidate metadata, publisher descriptions, aggregate library counts, top tags and authors, and relevant same-author title names. It does not receive book files, Calibre paths, or personal notes.
 
 ## Tests
 

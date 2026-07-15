@@ -18,6 +18,7 @@ complete_series = []
 ignore_series = []
 
 [taste]
+# Default genre preferences. Override them for one run with --genre.
 include = [
   "science fiction",
   "alternate history",
