@@ -87,6 +87,25 @@ class BookWatchTests(unittest.TestCase):
         self.assertTrue(all(candidate.ai for candidate in candidates))
         self.assertIn("13/13", status)
 
+    def test_openrouter_retries_a_failed_batch_three_times(self):
+        candidate = bw.Candidate("Book", ["A. Writer"])
+        candidate.score = 1
+        config = {
+            "openrouter": {
+                "enabled": True,
+                "api_key_env": "BOOK_WATCH_TEST_AI_KEY",
+                "model": "strong-primary",
+                "fallback_model": "strong-fallback",
+            },
+            "taste": {},
+        }
+        with patch.dict(os.environ, {"BOOK_WATCH_TEST_AI_KEY": "test-key"}), patch.object(
+            bw, "open_json_with_deadline", side_effect=TimeoutError("slow")
+        ) as request:
+            status = bw.enrich_with_openrouter([candidate], config)
+        self.assertEqual(request.call_count, 3)
+        self.assertIn("AI unavailable", status)
+
     def test_reactor_series_line(self):
         parser = bw.BlockParser()
         parser.feed(
@@ -284,6 +303,43 @@ class BookWatchTests(unittest.TestCase):
         self.assertEqual(candidates[0].series_index, 3)
         self.assertEqual(candidates[0].isbns, {"0316569364"})
         self.assertTrue(candidates[0].series_alert)
+
+    def test_update_reports_rechecks_calibre_and_missing_covers(self):
+        with tempfile.TemporaryDirectory() as folder:
+            report = Path(folder) / f"book-watch_{bw.date.today():%Y-%m-%d}_000000.html"
+            owned = bw.Candidate("Owned Book", ["A. Writer"])
+            available = bw.Candidate("Available Book", ["B. Writer"], isbns={"9780123456789"})
+            report.write_text(
+                f'''<section><h2>General discovery</h2>
+                <article><div class="score">10</div><h3>{owned.title}</h3><div class="by">A. Writer</div><div class="meta"><span>{bw.date.today()}</span></div><code>{owned.key}</code></article>
+                <article><img data-covers="[&quot;https://images-na.ssl-images-amazon.com/images/P/9780123456789.01.LZZZZZZZ.jpg&quot;]"><div class="score">10</div><h3>{available.title}</h3><div class="by">B. Writer</div><div class="meta"><span>{bw.date.today()}</span></div><code>{available.key}</code></article>
+                </section>''',
+                encoding="utf-8",
+            )
+            config = {
+                "report_dir": folder,
+                "state_path": str(Path(folder) / "state.sqlite"),
+                "library": {"path": folder, "snapshot": str(Path(folder) / "library.json")},
+                "sources": {"google_books": True, "open_library": False},
+                "run": {"past_days": 550, "future_days": 0},
+                "watch": {},
+                "taste": {},
+            }
+            conn = bw.connect_state(config)
+            bw.persist_candidates(conn, [owned, available])
+            conn.close()
+            cover = bw.Candidate(available.title, available.authors, cover_url="https://books.example/cover.jpg")
+            args = type("Args", (), {"config": "ignored.toml"})()
+            with patch.object(bw, "load_config", return_value=config), patch.object(
+                bw, "load_env_file", return_value=False
+            ), patch.object(
+                bw, "load_calibre", return_value=([{"title": owned.title, "authors": "A. Writer"}], "fresh Calibre export")
+            ), patch.object(bw, "google_candidates", return_value=([cover], [])) as request:
+                self.assertEqual(bw.update_reports(args), 0)
+            updated = report.read_text(encoding="utf-8")
+            self.assertNotIn(owned.title, updated)
+            self.assertIn(cover.cover_url, updated)
+            request.assert_called_once()
 
 
 if __name__ == "__main__":

@@ -502,12 +502,14 @@ def fill_missing_covers(
     config: dict[str, Any],
     candidates: list[Candidate],
     refresh: bool,
+    *,
+    retry_with_isbn: bool = False,
 ) -> tuple[int, int, int]:
     targets = [
         candidate
         for candidate in candidates
         if not candidate.cover_urls
-        and not candidate.isbns
+        and (retry_with_isbn or not candidate.isbns)
         and not candidate.owned
         and candidate.decision != "dismiss"
         and candidate.score > -10
@@ -836,6 +838,13 @@ def closest_series(name: str, authors: list[str], catalog_series: dict[str, dict
     return best_key if best_ratio >= 0.92 else ""
 
 
+def owned_in_catalog(candidate: Candidate, catalog: dict[str, Any]) -> bool:
+    title_key = normalize_title(candidate.title)
+    return bool(candidate.isbns & catalog["isbns"]) or any(
+        (title_key, normalize(author)) in catalog["signatures"] for author in candidate.authors
+    )
+
+
 def match_and_score(candidates: list[Candidate], catalog: dict[str, Any], config: dict[str, Any]) -> None:
     taste = [normalize(value) for value in config.get("taste", {}).get("include", [])]
     excluded = [normalize(value) for value in config.get("taste", {}).get("exclude", [])]
@@ -845,11 +854,8 @@ def match_and_score(candidates: list[Candidate], catalog: dict[str, Any], config
     past = date.today() - timedelta(days=int(config["run"].get("past_days", 550)))
     future = date.today() + timedelta(days=int(config["run"].get("future_days", 0)))
     for candidate in candidates:
-        title_key = normalize_title(candidate.title)
         author_keys = [normalize(author) for author in candidate.authors]
-        candidate.owned = bool(candidate.isbns & catalog["isbns"]) or any(
-            (title_key, author_key) in catalog["signatures"] for author_key in author_keys
-        )
+        candidate.owned = owned_in_catalog(candidate, catalog)
         for author, author_key in zip(candidate.authors, author_keys):
             if author_key in catalog["author_counts"]:
                 candidate.matched_author = catalog["author_counts"][author_key][0]
@@ -1118,7 +1124,8 @@ def enrich_with_openrouter(candidates: list[Candidate], config: dict[str, Any], 
             f"Taste profile: {json.dumps(taste, ensure_ascii=False)}\n\n"
             f"Candidates: {json.dumps(items, ensure_ascii=False)}"
         )
-        for model in [item for item in models if item and item != "None"]:
+        attempt_models = (models * 3)[:3]
+        for model in [item for item in attempt_models if item and item != "None"]:
             payload = {
                 "model": model,
                 "messages": [{"role": "user", "content": prompt}],
@@ -1478,7 +1485,11 @@ def parse_report_cards(source: str, metadata: dict[str, dict[str, Any]]) -> list
             covers_match = re.search(r'data-covers="([^"]+)"', article)
             if covers_match:
                 try:
-                    covers = json.loads(html.unescape(covers_match.group(1)))
+                    covers = [
+                        str(value)
+                        for value in json.loads(html.unescape(covers_match.group(1)))
+                        if "/images/P/" not in str(value) and "/b/isbn/" not in str(value)
+                    ]
                     candidate.cover_urls = list(dict.fromkeys([*candidate.cover_urls, *(str(value) for value in covers)]))
                     candidate.cover_url = candidate.cover_urls[0] if candidate.cover_urls else ""
                 except json.JSONDecodeError:
@@ -1500,7 +1511,9 @@ def parse_report_cards(source: str, metadata: dict[str, dict[str, Any]]) -> list
 
 
 def update_reports(args: argparse.Namespace) -> int:
-    config = load_config(Path(args.config).expanduser().resolve())
+    config_path = Path(args.config).expanduser().resolve()
+    config = load_config(config_path)
+    load_env_file(config_path.parent / ".env")
     report_dir = Path(config["report_dir"])
     paths = sorted(report_dir.glob("book-watch_*.html"))
     if not paths:
@@ -1508,53 +1521,69 @@ def update_reports(args: argparse.Namespace) -> int:
         return 0
     conn = connect_state(config)
     metadata = report_metadata_index(conn, config)
-    conn.close()
+    raw_books, catalog_status = load_calibre(config)
+    catalog = build_catalog(raw_books)
     updated = 0
-    for path in paths:
-        source = path.read_text(encoding="utf-8")
-        original_count = len(re.findall(r"<article\b", source, re.I))
-        candidates = parse_report_cards(source, metadata)
-        if len(candidates) != original_count:
-            print(f"Skipped {path.name}: parsed {len(candidates)}/{original_count} cards")
-            continue
+    try:
+        for path in paths:
+            source = path.read_text(encoding="utf-8")
+            original_count = len(re.findall(r"<article\b", source, re.I))
+            candidates = parse_report_cards(source, metadata)
+            if len(candidates) != original_count:
+                print(f"Skipped {path.name}: parsed {len(candidates)}/{original_count} cards")
+                continue
+            for candidate in candidates:
+                candidate.owned = owned_in_catalog(candidate, catalog)
+            try:
+                matched, targets, errors = fill_missing_covers(
+                    conn, config, candidates, False, retry_with_isbn=True
+                )
+                recheck_note = f"Update recheck: {matched}/{targets} missing covers found"
+                if errors:
+                    recheck_note += f"; {errors} query errors"
+            except Exception as exc:
+                recheck_note = f"Update recheck cover error: {redact_secrets(exc)}"
 
-        def count(label: str) -> int:
-            match = re.search(rf"<strong>([\d,]+)</strong>{re.escape(label)}", source, re.I)
-            return int(match.group(1).replace(",", "")) if match else 0
+            def count(label: str) -> int:
+                match = re.search(rf"<strong>([\d,]+)</strong>{re.escape(label)}", source, re.I)
+                return int(match.group(1).replace(",", "")) if match else 0
 
-        query_match = re.search(r"<strong>Authors queried:</strong>\s*(.*?)<br>\s*<strong>Series queried:</strong>\s*(.*?)</p>", source, re.I | re.S)
-        authors = [] if not query_match or plain_text(query_match.group(1)) == "none" else [value.strip() for value in plain_text(query_match.group(1)).split(",")]
-        series_queries = [] if not query_match or plain_text(query_match.group(2)) == "none" else [value.strip() for value in plain_text(query_match.group(2)).split(",")]
-        details = re.search(r"<details[^>]*>.*?</summary>\s*<p>(.*?)</p>\s*<p>(.*?)</p>\s*<ul>(.*?)</ul>", source, re.I | re.S)
-        catalog_status = plain_text(details.group(1)) if details else "Historical report"
-        ai_status = plain_text(details.group(2)) if details else "Historical report"
-        notes = [plain_text(value) for value in re.findall(r"<li>(.*?)</li>", details.group(3), re.I | re.S)] if details else []
-        day_match = re.search(r"(\d{4}-\d{2}-\d{2})", path.name)
-        report_day = datetime.strptime(day_match.group(1), "%Y-%m-%d").date() if day_match else date.today()
-        temporary = path.with_suffix(".html.tmp")
-        render_report(
-            candidates,
-            config,
-            authors,
-            series_queries,
-            count("Calibre books"),
-            catalog_status,
-            notes,
-            ai_status,
-            output_path=temporary,
-            report_day=report_day,
-            screened_count=count("external records screened"),
-            owned_suppressed_count=count("already-owned records suppressed"),
-            write_latest=False,
-        )
-        rendered = temporary.read_text(encoding="utf-8")
-        rendered_count = rendered.count('class="book-card"')
-        backup = path.with_suffix(".html.bak")
-        if not backup.exists():
-            shutil.copy2(path, backup)
-        temporary.replace(path)
-        updated += 1
-        print(f"Updated {path.name}: {original_count} -> {rendered_count} released cards")
+            query_match = re.search(r"<strong>Authors queried:</strong>\s*(.*?)<br>\s*<strong>Series queried:</strong>\s*(.*?)</p>", source, re.I | re.S)
+            authors = [] if not query_match or plain_text(query_match.group(1)) == "none" else [value.strip() for value in plain_text(query_match.group(1)).split(",")]
+            series_queries = [] if not query_match or plain_text(query_match.group(2)) == "none" else [value.strip() for value in plain_text(query_match.group(2)).split(",")]
+            details = re.search(r"<details[^>]*>.*?</summary>\s*<p>(.*?)</p>\s*<p>(.*?)</p>\s*<ul>(.*?)</ul>", source, re.I | re.S)
+            ai_status = plain_text(details.group(2)) if details else "Historical report"
+            notes = [plain_text(value) for value in re.findall(r"<li>(.*?)</li>", details.group(3), re.I | re.S)] if details else []
+            notes = [note for note in notes if not note.startswith("Update recheck")]
+            notes.append(recheck_note)
+            day_match = re.search(r"(\d{4}-\d{2}-\d{2})", path.name)
+            report_day = datetime.strptime(day_match.group(1), "%Y-%m-%d").date() if day_match else date.today()
+            temporary = path.with_suffix(".html.tmp")
+            render_report(
+                candidates,
+                config,
+                authors,
+                series_queries,
+                len(raw_books),
+                catalog_status,
+                notes,
+                ai_status,
+                output_path=temporary,
+                report_day=report_day,
+                screened_count=count("external records screened"),
+                owned_suppressed_count=count("already-owned records suppressed") + sum(item.owned for item in candidates),
+                write_latest=False,
+            )
+            rendered = temporary.read_text(encoding="utf-8")
+            rendered_count = rendered.count('class="book-card"')
+            backup = path.with_suffix(".html.bak")
+            if not backup.exists():
+                shutil.copy2(path, backup)
+            temporary.replace(path)
+            updated += 1
+            print(f"Updated {path.name}: {original_count} -> {rendered_count} released cards")
+    finally:
+        conn.close()
     if updated:
         shutil.copy2(paths[-1], report_dir / "latest.html")
     print(f"Updated {updated}/{len(paths)} timestamped reports; original files kept as .html.bak")
