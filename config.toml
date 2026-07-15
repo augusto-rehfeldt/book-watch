@@ -1,0 +1,63 @@
+[library]
+path = ".."
+calibredb = "calibredb"
+snapshot = "data/library.json"
+
+[run]
+past_days = 550
+future_days = 0
+authors_per_run = 8
+min_owned_books = 2
+
+[watch]
+# These are always checked. With an empty list, the normal run also rotates
+# through the least-recently-checked authors in the Calibre catalog.
+authors = []
+ongoing_series = []
+complete_series = []
+ignore_series = []
+
+[taste]
+include = [
+  "science fiction",
+  "alternate history",
+  "hard science fiction",
+  "space opera",
+  "first contact",
+  "military science fiction",
+  "artificial intelligence",
+  "fantasy",
+  "dark fantasy",
+  "horror",
+]
+exclude = []
+
+[sources]
+google_books = true
+open_library = true
+reactor = true
+hardcover = true
+subjects = ["science fiction", "alternate history", "fantasy", "horror"]
+reactor_genres = ["science-fiction", "fantasy", "horror"]
+reactor_months_back = 6
+reactor_months_forward = 1
+cache_hours = 24
+
+[google_books]
+api_key_env = "GOOGLE_BOOKS_API_KEY"
+
+[open_library]
+# Supplying an email lets Open Library identify the client and grant its higher
+# documented rate limit. Leave blank to use the anonymous one-request/second rate.
+contact_email = ""
+
+[hardcover]
+token_env = "HARDCOVER_API_TOKEN"
+
+[openrouter]
+enabled = true
+api_key_env = "OPENROUTER_API_KEY"
+model = "openrouter/free"
+fallback_model = "openrouter/free"
+base_url = "https://openrouter.ai/api/v1"
+timeout_seconds = 45
