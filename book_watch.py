@@ -9,6 +9,7 @@ import os
 import queue
 import re
 import shutil
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -30,6 +31,7 @@ from urllib.request import Request, urlopen
 VERSION = "0.2.0"
 ROOT = Path(__file__).resolve().parent
 DEFAULT_CONFIG = ROOT / "config.toml"
+OPENAI_OAUTH_PORT = 10531
 STATE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS http_cache (
     cache_key TEXT PRIMARY KEY,
@@ -1069,16 +1071,57 @@ def open_json_with_deadline(request: Request, timeout: int) -> dict[str, Any]:
     return value
 
 
+def _openai_oauth_proxy_running() -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", OPENAI_OAUTH_PORT), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
+def ensure_openai_oauth_proxy() -> None:
+    if _openai_oauth_proxy_running():
+        return
+    npx = shutil.which("npx.cmd") or shutil.which("npx")
+    if not npx:
+        raise RuntimeError("OpenAI OAuth requires Node.js with npx on PATH.")
+    progress("Starting the OpenAI OAuth proxy; complete browser sign-in if prompted...")
+    try:
+        subprocess.run([npx, "openai-oauth@latest", "--detach"], check=True)
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError("OpenAI OAuth proxy failed to start.") from exc
+    for _ in range(40):
+        if _openai_oauth_proxy_running():
+            return
+        time.sleep(0.25)
+    raise RuntimeError(f"OpenAI OAuth proxy did not open port {OPENAI_OAUTH_PORT}.")
+
+
+def openai_oauth_models(base_url: str) -> list[str]:
+    data = open_json_with_deadline(Request(base_url.rstrip("/") + "/models"), 10)
+    models = [
+        str(item["id"])
+        for item in data.get("data", [])
+        if isinstance(item, dict) and item.get("id") and "image" not in str(item["id"]).lower()
+    ]
+    if not models:
+        raise RuntimeError("OpenAI OAuth returned no text models from /v1/models.")
+    return list(dict.fromkeys(models))
+
+
 def enrich_with_openrouter(candidates: list[Candidate], config: dict[str, Any], catalog: dict[str, Any] | None = None) -> str:
-    ai_cfg = config.get("openrouter", {})
+    oauth_cfg = config.get("openai_oauth")
+    using_oauth = isinstance(oauth_cfg, dict)
+    ai_cfg = oauth_cfg if using_oauth else config.get("openrouter", {})
     if not ai_cfg.get("enabled", True):
         return "AI disabled in configuration"
     env_file = str(ai_cfg.get("env_file") or "").strip()
     if env_file:
         load_env_file(env_file)
-    key = os.getenv(str(ai_cfg.get("api_key_env", "OPENROUTER_API_KEY")), "")
-    if not key:
-        return "AI skipped: OPENROUTER_API_KEY is not configured"
+    key_env = str(ai_cfg.get("api_key_env", "" if using_oauth else "OPENROUTER_API_KEY"))
+    key = os.getenv(key_env, "") if key_env else ""
+    if not key and not using_oauth:
+        return f"AI skipped: {key_env} is not configured"
     # ponytail: cap slow free-model enrichment; raise only if the top 60 omit useful author matches.
     selected = sorted(
         [item for item in candidates if not item.owned and item.decision != "dismiss" and item.score > 0],
@@ -1087,6 +1130,11 @@ def enrich_with_openrouter(candidates: list[Candidate], config: dict[str, Any], 
     )[:60]
     if not selected:
         return "AI skipped: no eligible candidates"
+    if using_oauth:
+        try:
+            ensure_openai_oauth_proxy()
+        except RuntimeError as exc:
+            return f"AI unavailable; deterministic report produced. {exc}"
     taste = config.get("taste", {})
     library_profile = {
         "book_count": len((catalog or {}).get("books", [])),
@@ -1099,15 +1147,26 @@ def enrich_with_openrouter(candidates: list[Candidate], config: dict[str, Any], 
             for item in sorted((catalog or {}).get("author_counts", {}).values(), key=lambda item: item[1], reverse=True)[:20]
         ],
     }
-    base_url = str(ai_cfg.get("base_url", "https://openrouter.ai/api/v1")).rstrip("/")
-    models = list(dict.fromkeys(str(value) for value in (ai_cfg.get("model"), ai_cfg.get("fallback_model")) if value))
+    base_url = str(ai_cfg.get("base_url", "http://127.0.0.1:10531/v1" if using_oauth else "https://openrouter.ai/api/v1")).rstrip("/")
+    models = list(dict.fromkeys(str(value) for value in (ai_cfg.get("model", "gpt-5.4-mini" if using_oauth else None), ai_cfg.get("fallback_model")) if value))
+    provider_name = "OpenAI OAuth" if using_oauth else "OpenRouter"
+    if using_oauth:
+        try:
+            live_models = openai_oauth_models(base_url)
+        except (HTTPError, URLError, TimeoutError, KeyError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
+            return f"AI unavailable; deterministic report produced. Could not load OAuth models: {exc}"
+        models = [model for model in models if model in live_models] or live_models
+        progress(
+            f"OpenAI OAuth live text models: {', '.join(live_models)}. "
+            "Context/output limits are not reported by /v1/models."
+        )
     applied_total = 0
     used_models: set[str] = set()
     failed_batches = 0
     last_error = ""
     for start in range(0, len(selected), 12):
         batch = selected[start : start + 12]
-        progress(f"OpenRouter: enriching {start + 1}-{start + len(batch)} of {len(selected)}...")
+        progress(f"{provider_name}: enriching {start + 1}-{start + len(batch)} of {len(selected)}...")
         items = []
         owned_titles: dict[str, list[str]] = {}
         for rank, item in enumerate(batch):
@@ -1153,15 +1212,17 @@ def enrich_with_openrouter(candidates: list[Candidate], config: dict[str, Any], 
                 "temperature": 0,
                 "max_tokens": 2200,
             }
+            headers = {
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://localhost/calibre-book-watch",
+                "X-Title": "Calibre Book Recommender",
+            }
+            if key:
+                headers["Authorization"] = f"Bearer {key}"
             request = Request(
                 base_url + "/chat/completions",
                 data=json.dumps(payload).encode("utf-8"),
-                headers={
-                    "Authorization": f"Bearer {key}",
-                    "Content-Type": "application/json",
-                    "HTTP-Referer": "https://localhost/calibre-book-watch",
-                    "X-Title": "Calibre Book Recommender",
-                },
+                headers=headers,
                 method="POST",
             )
             try:
@@ -1701,7 +1762,7 @@ def run_report(args: argparse.Namespace) -> int:
         match_and_score(candidates, catalog, config)
         load_decisions(conn, candidates)
         candidates.sort(key=lambda item: (item.score, item.published_date), reverse=True)
-        progress("OpenRouter: enriching top candidates..." if not args.no_ai else "OpenRouter disabled for this run")
+        progress("AI: enriching top candidates..." if not args.no_ai else "AI disabled for this run")
         ai_status = "AI disabled for this run" if args.no_ai else enrich_with_openrouter(candidates, config, catalog)
         progress(ai_status)
         if not args.no_network and (sources.get("google_books", True) or sources.get("open_library", True)):

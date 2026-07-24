@@ -2,12 +2,13 @@
 
 Calibre Book Recommender builds a local HTML report of recently released English-language books that match your Calibre library and the genres you want right now.
 
-It reads Calibre through `calibredb` and never changes the library. Book data comes from Google Books, Open Library, Hardcover, and Reactor. OpenRouter can optionally rank releases using your chosen genres plus aggregate signals from your library's tags and authors, and detect translated or retitled books you already own.
+It reads Calibre through `calibredb` and never changes the library. Book data comes from Google Books, Open Library, Hardcover, and Reactor. OpenAI OAuth can optionally rank releases using your ChatGPT account, chosen genres, and aggregate signals from your library, and detect translated or retitled books you already own.
 
 ## Requirements
 
 - Python 3.11 or newer
 - [Calibre](https://calibre-ebook.com/) with `calibredb` on `PATH`
+- Node.js with `npx` (only for OpenAI OAuth)
 - No third-party Python packages
 
 ## Quick start
@@ -20,6 +21,11 @@ python book_watch.py self-test
 python book_watch.py run
 ```
 
+When AI enrichment is needed, Book Watch starts the loopback-only OpenAI OAuth
+proxy automatically. On first use, `npx` may ask to download it and a browser
+may open for sign-in. The configured model is checked against the proxy's live
+text-model list; context and output limits are not currently reported.
+
 Reports are written to `reports/`; open `reports/latest.html` in a browser.
 
 ## Configuration
@@ -31,10 +37,10 @@ API keys are optional. Put any you use in a local `.env` file:
 ```dotenv
 GOOGLE_BOOKS_API_KEY=...
 HARDCOVER_API_TOKEN=...
-OPENROUTER_API_KEY=...
 ```
 
-`.env` is ignored by Git. Without an OpenRouter key, AI ranking is skipped; without a Hardcover token, Hardcover is skipped.
+`.env` is ignored by Git. OpenAI OAuth needs no API key; it reuses the local
+Codex credentials in `~/.codex`. Without a Hardcover token, Hardcover is skipped.
 
 ## Commands
 
@@ -70,7 +76,7 @@ Run `python book_watch.py --help` or `python book_watch.py run --help` for every
 
 Generated reports, the cached Calibre snapshot, HTTP responses, decisions, and run history stay under `reports/` and `data/`; both directories are ignored by Git. If Calibre is open or unavailable, the recommender uses the last successful snapshot.
 
-OpenRouter receives candidate metadata, publisher descriptions, aggregate library counts, top tags and authors, and relevant same-author title names. It does not receive book files, Calibre paths, or personal notes.
+The unofficial OpenAI OAuth proxy sends candidate metadata, publisher descriptions, aggregate library counts, top tags and authors, and relevant same-author title names using your ChatGPT account. It does not receive book files, Calibre paths, or personal notes. Treat the OAuth credentials in `~/.codex` like a password.
 
 ## Tests
 

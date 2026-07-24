@@ -90,6 +90,35 @@ class BookWatchTests(unittest.TestCase):
         prompt = json.loads(request.call_args_list[0].args[0].data)["messages"][0]["content"]
         self.assertIn('"top_tags": ["Science Fiction"]', prompt)
 
+    def test_openai_oauth_needs_no_api_key(self):
+        candidate = bw.Candidate("Book", ["A. Writer"])
+        candidate.score = 1
+        response = {"choices": [{"message": {"content": json.dumps({"items": [{"id": candidate.key, "fit_score": 80}]})}}]}
+        config = {"openai_oauth": {"model": "gpt-5.4-mini"}, "taste": {}}
+        with patch.object(bw, "ensure_openai_oauth_proxy"), patch.object(
+            bw, "openai_oauth_models", return_value=["gpt-5.4-mini"]
+        ), patch.object(
+            bw, "open_json_with_deadline", return_value=response
+        ) as send:
+            status = bw.enrich_with_openrouter([candidate], config)
+        request = send.call_args.args[0]
+        self.assertEqual(request.full_url, "http://127.0.0.1:10531/v1/chat/completions")
+        self.assertIsNone(request.get_header("Authorization"))
+        self.assertIn("AI enriched 1/1", status)
+
+    def test_oauth_models_are_live_and_text_only(self):
+        response = {"data": [{"id": "gpt-5.6-sol"}, {"id": "gpt-5.4-mini"}, {"id": "gpt-image-2"}]}
+        with patch.object(bw, "open_json_with_deadline", return_value=response):
+            models = bw.openai_oauth_models("http://127.0.0.1:10531/v1")
+        self.assertEqual(models, ["gpt-5.6-sol", "gpt-5.4-mini"])
+
+    def test_starts_missing_oauth_proxy_with_npx(self):
+        with patch.object(bw, "_openai_oauth_proxy_running", side_effect=[False, True]), patch.object(
+            bw.shutil, "which", return_value="npx"
+        ), patch.object(bw.subprocess, "run") as run:
+            bw.ensure_openai_oauth_proxy()
+        run.assert_called_once_with(["npx", "openai-oauth@latest", "--detach"], check=True)
+
     def test_genre_option_is_repeatable(self):
         args = bw.build_parser().parse_args(["run", "--genre", "cozy fantasy", "-g", "mystery"])
         self.assertEqual(args.genre, ["cozy fantasy", "mystery"])

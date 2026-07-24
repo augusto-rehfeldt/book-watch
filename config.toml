@@ -55,10 +55,8 @@ contact_email = ""
 [hardcover]
 token_env = "HARDCOVER_API_TOKEN"
 
-[openrouter]
+[openai_oauth]
 enabled = true
-api_key_env = "OPENROUTER_API_KEY"
-model = "nvidia/nemotron-3-ultra-550b-a55b:free"
-fallback_model = "nvidia/nemotron-3-super-120b-a12b:free"
-base_url = "https://openrouter.ai/api/v1"
-timeout_seconds = 45
+model = "gpt-5.6-terra"
+base_url = "http://127.0.0.1:10531/v1"
+timeout_seconds = 120
