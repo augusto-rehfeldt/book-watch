@@ -1794,30 +1794,13 @@ def open_json_with_deadline(request: Request, timeout: int) -> dict[str, Any]:
     return value
 
 
-def _openai_oauth_proxy_running() -> bool:
-    try:
-        with socket.create_connection(("127.0.0.1", OPENAI_OAUTH_PORT), timeout=0.5):
-            return True
-    except OSError:
-        return False
-
-
 def ensure_openai_oauth_proxy() -> None:
-    if _openai_oauth_proxy_running():
-        return
-    npx = shutil.which("npx.cmd") or shutil.which("npx")
-    if not npx:
-        raise RuntimeError("OpenAI OAuth requires Node.js with npx on PATH.")
-    progress("Starting the OpenAI OAuth proxy; complete browser sign-in if prompted...")
+    """Start the local OpenAI OAuth proxy via book writer's shared helper."""
     try:
-        subprocess.run([npx, "openai-oauth@latest", "--detach"], check=True)
-    except subprocess.CalledProcessError as exc:
-        raise RuntimeError("OpenAI OAuth proxy failed to start.") from exc
-    for _ in range(40):
-        if _openai_oauth_proxy_running():
-            return
-        time.sleep(0.25)
-    raise RuntimeError(f"OpenAI OAuth proxy did not open port {OPENAI_OAUTH_PORT}.")
+        start = book_writer_ai().ensure_openai_oauth_proxy
+    except Exception as exc:  # noqa: BLE001 - surfaced like any other proxy failure
+        raise RuntimeError(f"OpenAI OAuth unavailable: {redact_secrets(exc)}") from exc
+    start()
 
 
 def openai_oauth_models(base_url: str, key: str = "") -> list[str]:
@@ -1852,17 +1835,11 @@ AI_PROVIDERS: dict[str, dict[str, Any]] = {
 
 
 def opencode_auth_key() -> str:
-    """The Zen key opencode's CLI stored at login, so book-watch need not duplicate it."""
-    path = Path.home() / ".local" / "share" / "opencode" / "auth.json"
+    """The Zen key opencode's CLI stored at login, read by book writer's shared helper."""
     try:
-        auth = json.loads(path.read_text(encoding="utf-8"))
-        for name in ("opencode-zen", "opencode", "opencode-go"):
-            entry = auth.get(name) or {}
-            if entry.get("type") == "api" and entry.get("key"):
-                return str(entry["key"])
-    except Exception:  # noqa: BLE001 - no auth file is just no fallback
-        pass
-    return ""
+        return str(book_writer_ai().load_opencode_go_sync().get("api_key") or "")
+    except Exception:  # noqa: BLE001 - no auth file or no book writer is just no fallback
+        return ""
 
 
 def jwt_expired(token: str) -> bool:
@@ -1913,21 +1890,33 @@ def ai_key(ai_cfg: dict[str, Any]) -> str:
 
 
 BOOK_WRITER_DIR = Path(os.getenv("BOOK_WATCH_BOOK_WRITER") or (Path(__file__).resolve().parent.parent / "book writer"))
+_book_writer: dict[str, Any] = {}
+_book_writer_lock = threading.Lock()
 _commandcode_adapter: dict[str, Any] = {}
 
 
+def book_writer_ai() -> Any:
+    """book writer's ai_service module -- the shared AI backend music-writer and
+    mathforge use -- loaded once by file path. Raises when book writer is absent."""
+    with _book_writer_lock:  # report-server threads may ask at once
+        if "module" in _book_writer:
+            return _book_writer["module"]
+        module_path = BOOK_WRITER_DIR / "ai_book_creator" / "services" / "ai_service.py"
+        spec = importlib.util.spec_from_file_location("book_writer_ai_service", module_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _book_writer["module"] = module
+        return module
+
+
 def commandcode_adapter() -> dict[str, Any]:
-    """book writer's Command Code CLI adapter — the same module music-writer and
-    mathforge load — so executable discovery, invocation and timeout handling are
-    one implementation across the workspace. Cached; carries {"error": …} when the
-    module or the CLI is unavailable."""
+    """book writer's Command Code CLI adapter, so executable discovery, invocation
+    and timeout handling are one implementation across the workspace. Cached;
+    carries {"error": ...} when the module or the CLI is unavailable."""
     if not _commandcode_adapter:
         try:
-            module_path = BOOK_WRITER_DIR / "ai_book_creator" / "services" / "ai_service.py"
+            module = book_writer_ai()
             config_path = BOOK_WRITER_DIR / "ai_book_creator" / "config" / "ai_config_commandcode.json"
-            spec = importlib.util.spec_from_file_location("book_writer_ai_service", module_path)
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
             config = json.loads(config_path.read_text(encoding="utf-8"))
             module.commandcode_executable()
             _commandcode_adapter.update(

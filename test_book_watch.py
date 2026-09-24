@@ -245,9 +245,10 @@ class BookWatchTests(unittest.TestCase):
         self.assertEqual(models, ["gpt-5.6-sol", "gpt-5.4-mini"])
 
     def test_starts_missing_oauth_proxy_with_npx(self):
-        with patch.object(bw, "_openai_oauth_proxy_running", side_effect=[False, True]), patch.object(
-            bw.shutil, "which", return_value="npx"
-        ), patch.object(bw.subprocess, "run") as run:
+        shared = bw.book_writer_ai()  # the proxy starter is book writer's, shared across the workspace
+        with patch.object(shared, "_openai_oauth_proxy_running", side_effect=[False, True]), patch.object(
+            shared.shutil, "which", return_value="npx"
+        ), patch.object(shared.subprocess, "run") as run:
             bw.ensure_openai_oauth_proxy()
         run.assert_called_once_with(["npx", "openai-oauth@latest", "--detach"], check=True)
 

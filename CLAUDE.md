@@ -30,6 +30,13 @@ Builds a local HTML report of new releases matching your Calibre library + chose
   tests the adapter must be patched (`commandcode_adapter`), or a test will invoke the
   real CLI and hang for tens of seconds. The report's provider picker defaults to it
   and its model list comes from book writer's config, not a `/models` call.
+- **Shared AI plumbing comes from book writer.** `book_writer_ai()` loads book writer's
+  `ai_service.py` once by file path (`BOOK_WATCH_BOOK_WRITER` overrides the location);
+  `commandcode_adapter()`, `ensure_openai_oauth_proxy()` and `opencode_auth_key()` delegate
+  to it instead of keeping copies. Provider choice, key discovery (Crush, `AW_API_KEY`),
+  fallback order, model validation and the HTTP ranking/assist calls stay here: they are
+  book-watch's own settings, with fail-fast timeouts a report needs, whereas book
+  writer's `generate_content` waits out usage limits for hours.
 - **The sources run concurrently; the throttles are still per host.** `fetch_sources`
   submits one `fetch_source` task per enabled source to a thread pool — each task opens
   its **own** `connect_state` connection (pool threads must never share one) and Mobilism
