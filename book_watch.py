@@ -1895,33 +1895,92 @@ _book_writer_lock = threading.Lock()
 _commandcode_adapter: dict[str, Any] = {}
 
 
-def book_writer_ai() -> Any:
-    """book writer's ai_service module -- the shared AI backend music-writer and
-    mathforge use -- loaded once by file path. Raises when book writer is absent."""
+def _book_writer_package(name: str) -> Any:
+    """A module of book writer's ai_book_creator package -- the shared AI suite every
+    workspace AI script uses. Raises when book writer is absent."""
     with _book_writer_lock:  # report-server threads may ask at once
-        if "module" in _book_writer:
-            return _book_writer["module"]
-        module_path = BOOK_WRITER_DIR / "ai_book_creator" / "services" / "ai_service.py"
-        spec = importlib.util.spec_from_file_location("book_writer_ai_service", module_path)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        _book_writer["module"] = module
-        return module
+        if name not in _book_writer:
+            if str(BOOK_WRITER_DIR) not in sys.path:
+                sys.path.insert(0, str(BOOK_WRITER_DIR))
+            _book_writer[name] = importlib.import_module(name)
+        return _book_writer[name]
+
+
+def book_writer_ai() -> Any:
+    """book writer's ai_service module (AIService, OAuth proxy and auth helpers)."""
+    return _book_writer_package("ai_book_creator.services.ai_service")
+
+
+def book_writer_config_path(provider: str) -> str:
+    """book writer's config file for one of its providers (its .local.json copy first)."""
+    return _book_writer_package("ai_book_creator.cli").provider_config_path(provider)
+
+
+# book-watch's provider names -> book writer's. Book-watch keeps choosing the provider,
+# finding its key (env, AW_API_KEY, Crush, opencode auth) and validating models; every
+# completion then runs through book writer's AIService like the rest of the workspace.
+SHARED_PROVIDERS = {
+    "hyper": "hyper",
+    "opencode": "opencode-zen",
+    # Anthropic's API (ANTHROPIC_API_KEY) via its OpenAI-compatible endpoint; book
+    # writer's own "claude" is the Claude Code CLI, a different account.
+    "claude": "openrouter",
+    "openrouter": "openrouter",
+    "OpenRouter": "openrouter",
+    "commandcode": "commandcode",
+    "OpenAI OAuth": "openai-oauth",
+}
+_CLI_PROVIDERS = {"commandcode"}
+_shared_services: dict[tuple, Any] = {}
+
+
+def shared_ai_service(provider: str, overrides: dict[str, Any]) -> Any:
+    """book writer's AIService for `provider` with book-watch's key/endpoint/timeout.
+    One instance per distinct setting, reused across batches and report requests."""
+    cache_key = (provider, tuple(sorted(overrides.items())))
+    with _book_writer_lock:
+        cached = _shared_services.get(cache_key)
+    if cached is not None:
+        return cached
+    service = book_writer_ai().AIService(
+        config_path=book_writer_config_path(provider),
+        usage_state_path=str(Path(__file__).resolve().parent / "data" / "ai_usage.json"),
+        allow_auth_prompt=False,
+        client_max_retries=0,
+        config_overrides=dict(overrides),
+    )
+    with _book_writer_lock:
+        return _shared_services.setdefault(cache_key, service)
+
+
+def ai_completion(provider_name: str, ai_cfg: dict[str, Any], key: str, base_url: str, model: str,
+                  prompt: str, max_tokens: int) -> str:
+    """One completion through the shared suite. Fails fast: a report never waits out a usage limit."""
+    provider = SHARED_PROVIDERS.get(provider_name, "openrouter")
+    overrides: dict[str, Any] = {"timeout": int(ai_cfg.get("timeout_seconds", 120))}
+    if provider not in _CLI_PROVIDERS:
+        # The report's caps are ceilings on metered gateways, spelled max_tokens as before.
+        overrides.update(token_param="max_tokens", cap_is_ceiling=True)
+        overrides["base_url"] = base_url
+        if key:
+            overrides["api_key"] = key
+    service = shared_ai_service(provider, overrides)
+    return str(service.generate_content(prompt, model=model, max_completion_tokens=max_tokens,
+                                        max_retries=1, wait_for_limits=False, temperature=0.0))
 
 
 def commandcode_adapter() -> dict[str, Any]:
-    """book writer's Command Code CLI adapter, so executable discovery, invocation
-    and timeout handling are one implementation across the workspace. Cached;
-    carries {"error": ...} when the module or the CLI is unavailable."""
+    """book writer's Command Code model list and CLI check, so the report's picker
+    offers what book writer's commandcode config serves. Cached; carries
+    {"error": ...} when the module or the CLI is unavailable."""
     if not _commandcode_adapter:
         try:
             module = book_writer_ai()
-            config_path = BOOK_WRITER_DIR / "ai_book_creator" / "config" / "ai_config_commandcode.json"
+            config_path = Path(book_writer_config_path("commandcode"))
             config = json.loads(config_path.read_text(encoding="utf-8"))
             module.commandcode_executable()
             _commandcode_adapter.update(
                 {
-                    "chat": module.commandcode_chat,
                     "models": [str(name) for name in (config.get("models") or {})],
                     "writing_model": str(config.get("writing_model") or ""),
                     "review_model": str(config.get("review_model") or ""),
@@ -2074,8 +2133,8 @@ def enrich_with_openrouter(candidates: list[Candidate], config: dict[str, Any], 
     if len(models) > 6:
         models = models[:6]
     cli_adapter = commandcode_adapter() if ai_cfg.get("cli") else None
-    if cli_adapter is not None and "chat" not in cli_adapter:
-        return f"AI unavailable; deterministic report produced. {cli_adapter.get('error', 'adapter failed to load')}"
+    if cli_adapter is not None and "error" in cli_adapter:
+        return f"AI unavailable; deterministic report produced. {cli_adapter['error']}"
     applied_total = 0
     used_models: set[str] = set()
     failed_batches = 0
@@ -2123,30 +2182,7 @@ def enrich_with_openrouter(candidates: list[Candidate], config: dict[str, Any], 
         attempt_models = (models * 3)[:3]
         for model in [item for item in attempt_models if item and item != "None"]:
             try:
-                if cli_adapter is not None:
-                    content = str(cli_adapter["chat"](model, prompt, timeout=int(ai_cfg.get("timeout_seconds", 120))))
-                else:
-                    payload = {
-                        "model": model,
-                        "messages": [{"role": "user", "content": prompt}],
-                        "temperature": 0,
-                        "max_tokens": 2200,
-                    }
-                    headers = {
-                        "Content-Type": "application/json",
-                        "HTTP-Referer": "https://localhost/calibre-book-watch",
-                        "X-Title": "Calibre Book Recommender",
-                    }
-                    if key:
-                        headers["Authorization"] = f"Bearer {key}"
-                    request = Request(
-                        base_url + "/chat/completions",
-                        data=json.dumps(payload).encode("utf-8"),
-                        headers=headers,
-                        method="POST",
-                    )
-                    data = open_json_with_deadline(request, int(ai_cfg.get("timeout_seconds", 120)))
-                    content = str(data["choices"][0]["message"]["content"])
+                content = ai_completion(provider_name, ai_cfg, key, base_url, model, prompt, 2200)
                 parsed = parse_json_response(content)
                 results = parsed if isinstance(parsed, list) else next(
                     (parsed.get(key) for key in ("items", "candidates", "recommendations", "results", "books") if isinstance(parsed.get(key), list)),
@@ -2158,15 +2194,8 @@ def enrich_with_openrouter(candidates: list[Candidate], config: dict[str, Any], 
                     used_models.add(model)
                     break
                 last_error = f"{model}: response contained no verifiable candidates"
-            except (HTTPError, URLError, TimeoutError, KeyError, ValueError, OSError, RuntimeError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
-                if isinstance(exc, HTTPError):
-                    try:
-                        detail = exc.read().decode("utf-8", errors="replace")[:300]
-                    except Exception:
-                        detail = ""
-                    last_error = f"{model}: HTTP {exc.code} {detail}"
-                else:
-                    last_error = f"{model}: {exc}"
+            except Exception as exc:  # noqa: BLE001 - any provider/SDK failure costs this batch, never the report
+                last_error = f"{model}: {redact_secrets(exc)[:300]}"
         else:
             failed_batches += 1
     if applied_total:
@@ -2176,10 +2205,11 @@ def enrich_with_openrouter(candidates: list[Candidate], config: dict[str, Any], 
     return "AI unavailable; deterministic report produced. " + last_error
 
 
-def ai_chat(config: dict[str, Any], prompt: str, *, max_tokens: int = 400) -> str:
+def ai_chat(config: dict[str, Any], prompt: str, *, max_tokens: int = 400, model: str | None = None) -> str:
     """One short completion from the configured provider, or "" when unavailable.
 
-    For the small helper prompts; the ranking pass keeps its own batching path.
+    For the small helper prompts (fetch assist, categories, Anna validation); the
+    ranking pass keeps its own batching path. `model` overrides the provider's model.
     """
     provider_name, ai_cfg, using_oauth = resolve_ai_provider(config)
     if provider_name == "none" or not ai_cfg.get("enabled", True):
@@ -2196,32 +2226,18 @@ def ai_chat(config: dict[str, Any], prompt: str, *, max_tokens: int = 400) -> st
         except RuntimeError:
             return ""
     base_url = str(ai_cfg.get("base_url", f"http://127.0.0.1:{OPENAI_OAUTH_PORT}/v1" if using_oauth else "https://openrouter.ai/api/v1")).rstrip("/")
-    model = str(ai_cfg.get("model") or ai_cfg.get("default_model") or "")
+    model = str(model or ai_cfg.get("model") or ai_cfg.get("default_model") or "")
     if ai_cfg.get("cli"):
         adapter = commandcode_adapter()
-        if "chat" not in adapter:
-            progress(f"  AI assist unavailable: {adapter.get('error', 'adapter failed to load')}")
+        if "error" in adapter:
+            progress(f"  AI assist unavailable: {adapter['error']}")
             return ""
-        try:
-            return str(adapter["chat"](model or adapter.get("writing_model") or "", prompt, timeout=int(ai_cfg.get("timeout_seconds", 120))))
-        except Exception as exc:  # noqa: BLE001 - a failed assist must never abort a download
-            progress(f"  AI assist unavailable (commandcode): {redact_secrets(exc)}")
-            return ""
+        model = model or str(adapter.get("writing_model") or "")
     if not model:
         return ""
-    headers = {"Content-Type": "application/json", "X-Title": "Calibre Book Recommender"}
-    if key:
-        headers["Authorization"] = f"Bearer {key}"
-    request = Request(
-        base_url + "/chat/completions",
-        data=json.dumps({"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0, "max_tokens": max_tokens}).encode("utf-8"),
-        headers=headers,
-        method="POST",
-    )
     try:
-        data = open_json_with_deadline(request, int(ai_cfg.get("timeout_seconds", 120)))
-        return str(data["choices"][0]["message"]["content"])
-    except (HTTPError, URLError, TimeoutError, KeyError, ValueError, json.JSONDecodeError) as exc:
+        return ai_completion(provider_name, ai_cfg, key, base_url, model, prompt, max_tokens)
+    except Exception as exc:  # noqa: BLE001 - a failed assist must never abort a download
         progress(f"  AI assist unavailable ({provider_name}): {redact_secrets(exc)}")
         return ""
 
@@ -2429,10 +2445,10 @@ def ai_providers_status(config: dict[str, Any]) -> dict[str, Any]:
             # Offline like everything else here, but the static model list comes
             # from book writer's commandcode config instead of the one default.
             adapter = commandcode_adapter()
-            if "chat" in adapter:
-                status[name]["models"] = list(dict.fromkeys([default_model, *adapter["models"]]))
+            if "error" in adapter:
+                status[name]["error"] = str(adapter["error"])[:200]
             else:
-                status[name]["error"] = str(adapter.get("error", "unavailable"))[:200]
+                status[name]["models"] = list(dict.fromkeys([default_model, *adapter["models"]]))
     return status
 
 
@@ -2447,8 +2463,8 @@ def ai_provider_models(config: dict[str, Any], name: str) -> dict[str, Any]:
     if spec.get("cli"):
         # No endpoint to query: the list is book writer's commandcode config.
         adapter = commandcode_adapter()
-        if "chat" not in adapter:
-            return {"models": [default_model] if default_model else [], "error": str(adapter.get("error", "unavailable"))[:200], "live": False}
+        if "error" in adapter:
+            return {"models": [default_model] if default_model else [], "error": str(adapter["error"])[:200], "live": False}
         return {"models": list(dict.fromkeys([default_model, *adapter["models"]])), "error": "", "live": False}
     base_url = str(section.get("base_url") or spec["base_url"]).rstrip("/")
     entry: dict[str, Any] = {"models": [default_model] if default_model else [], "error": "", "live": bool(spec.get("live_models"))}

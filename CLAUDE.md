@@ -19,24 +19,26 @@ Builds a local HTML report of new releases matching your Calibre library + chose
 
 ## Gotchas
 - **The AI default is `commandcode`, a CLI provider, not an HTTP gateway.** It runs
-  `cmdc -p --output-format text --model <model>` through **book writer's own adapter**
-  (`commandcode_adapter()` loads `book writer/ai_book_creator/services/ai_service.py` by
-  file path — the same module music-writer and mathforge use — plus its
-  `ai_config_commandcode.json` for the model list). Auth is the user's Command Code
+  `cmdc -p --output-format text --model <model>` through **book writer's AIService**
+  (its commandcode provider; `commandcode_adapter()` only checks the CLI is installed and
+  reads `ai_config_commandcode.json` for the model list). Auth is the user's Command Code
   login; `ai_key()` returns a sentinel for `cli:` providers so `resolve_ai_provider`
   treats it as usable. Two hard rules: **CLI providers are never a silent fallback** —
   the `resolve_ai_provider` scan skips them, so a dead hyper key falls back to
   opencode/OAuth exactly as before and never starts shelling out to `cmdc`; and in
-  tests the adapter must be patched (`commandcode_adapter`), or a test will invoke the
-  real CLI and hang for tens of seconds. The report's provider picker defaults to it
+  tests `commandcode_adapter` and `shared_ai_service` must be patched, or a test will
+  invoke the real CLI and hang for tens of seconds. The report's provider picker defaults to it
   and its model list comes from book writer's config, not a `/models` call.
-- **Shared AI plumbing comes from book writer.** `book_writer_ai()` loads book writer's
-  `ai_service.py` once by file path (`BOOK_WATCH_BOOK_WRITER` overrides the location);
-  `commandcode_adapter()`, `ensure_openai_oauth_proxy()` and `opencode_auth_key()` delegate
-  to it instead of keeping copies. Provider choice, key discovery (Crush, `AW_API_KEY`),
-  fallback order, model validation and the HTTP ranking/assist calls stay here: they are
-  book-watch's own settings, with fail-fast timeouts a report needs, whereas book
-  writer's `generate_content` waits out usage limits for hours.
+- **Every AI completion runs on book writer's AIService** (the workspace's one AI suite;
+  `BOOK_WATCH_BOOK_WRITER` overrides its location, imported as the `ai_book_creator` package).
+  Book-watch keeps what is its own: provider choice (`--ai`, `[ai] provider`), key discovery
+  (env, `AW_API_KEY`, Crush, opencode auth), fallback order and model validation.
+  `ai_completion()` then maps the provider onto book writer's (`SHARED_PROVIDERS`; `[claude]`
+  is Anthropic's API on the generic OpenAI-compatible client, not the Claude Code CLI) and
+  `shared_ai_service()` builds one cached service per key/endpoint/timeout via
+  `config_overrides`. Calls use `max_retries=1, wait_for_limits=False`: a report fails fast
+  instead of waiting out a usage limit for hours. Tests patch `shared_ai_service`; the
+  source must never contain its own `/chat/completions` request.
 - **The sources run concurrently; the throttles are still per host.** `fetch_sources`
   submits one `fetch_source` task per enabled source to a thread pool — each task opens
   its **own** `connect_state` connection (pool threads must never share one) and Mobilism

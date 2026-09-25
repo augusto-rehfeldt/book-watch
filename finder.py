@@ -549,7 +549,7 @@ def main(argv=None):
         help="Gitignored file containing the path to the input CSV.",
     )
     parser.add_argument("--output-file", default="found_books_validated.txt", help="Path to the output text file.")
-    parser.add_argument("--model", default="gpt-5-mini", help="OpenAI model to use for validation.")
+    parser.add_argument("--model", default=None, help="Model for book-watch's configured AI provider (default: its configured model).")
     parser.add_argument(
         "--confidence-threshold",
         type=int,
@@ -572,11 +572,8 @@ def main(argv=None):
         print(f"CRITICAL: {exc}")
         sys.exit(1)
 
-    try:
-        ai_service = AIService(model=args.model, verbose=args.verbose)
-    except (ValueError, FileNotFoundError, ConnectionError) as exc:
-        print(f"CRITICAL: Failed to initialize AI Service. Error: {exc}")
-        sys.exit(1)
+    # Validation runs on book-watch's configured AI provider (book writer's shared suite).
+    ai_service = AIService(bw.load_config(Path(args.config)), model=args.model, verbose=args.verbose)
 
     if args.verbose:
         print(f"Processing {len(books_to_search)} books from {args.input_file}...")

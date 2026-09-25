@@ -1,20 +1,22 @@
 # Anna lookup (formerly book_finder)
 
-A small book lookup pipeline for matching a CSV of missing books against Anna's Archive and validating the best candidate with OpenAI.
+A small book lookup pipeline for matching a CSV of missing books against Anna's Archive and validating the best candidate with book-watch's configured AI provider
+(book writer's shared AIService, like every AI script in the workspace).
 
 ## What it does
 
 - Reads books from a gitignored path file (`.missing_books_path`) that points to your missing-books CSV
 - Searches Anna's Archive for each title/author pair
 - Filters likely matches
-- Validates candidates through the OpenAI API
+- Validates candidates with book-watch's AI provider (`[ai] provider` in its config)
 - Writes confirmed matches to `found_books_validated.txt`
 
 ## Requirements
 
 - Python 3.10+
 - `requests`
-- An OpenAI API key in `api_key.txt`
+- book-watch's AI provider configured (default Command Code; see book-watch's README)
+- The sibling `book writer` project (or `BOOK_WATCH_BOOK_WRITER`)
 
 Install dependencies:
 
@@ -58,7 +60,7 @@ Or pass explicit paths:
 python finder.py \
   --input-file /path/to/missing_books.csv \
   --output-file found_books_validated.txt \
-  --model gpt-5-mini
+  --model <model id for the configured provider>   # optional
 ```
 
 Verbose mode shows per-book progress:
@@ -96,7 +98,8 @@ alone reads `Reason: direct Library Genesis download, <why Anna's Archive gave n
 
 ## Notes
 
-- `api_key.txt` is ignored by git so you can keep your key local.
+- No key file: keys come from book-watch's provider configuration (`.env`, Crush or
+  opencode logins). An old `api_key.txt` is no longer read.
 - The CLI is quiet by default and only prints a final summary unless `--verbose` is set.
 - Search retries are built in for transient request failures.
 - If a book can't be matched, the CLI prints a hint pointing to the `annas-mcp` project (`book-search` / `book-download`) so you can try a download workflow for permitted copies.

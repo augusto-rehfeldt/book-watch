@@ -16,6 +16,22 @@ from urllib.request import Request, urlopen
 import book_watch as bw
 
 
+class FakeService:
+    """Stands in for book writer's AIService: replays replies, records calls."""
+
+    def __init__(self, replies):
+        self.replies = list(replies)
+        self.calls = []
+
+    def generate_content(self, prompt, **kwargs):
+        self.calls.append((prompt, kwargs))
+        reply = self.replies.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+
+
 class BookWatchTests(unittest.TestCase):
     def test_load_local_env_file(self):
         key = "BOOK_WATCH_TEST_ENV"
@@ -74,63 +90,71 @@ class BookWatchTests(unittest.TestCase):
             with self.assertRaises(TimeoutError):
                 bw.open_json_with_deadline(object(), 0.01)
 
+    def shared(self, *replies):
+        """Patch book writer's AIService factory; returns (factory mock, fake service)."""
+        service = FakeService(replies)
+        factory = patch.object(bw, "shared_ai_service", return_value=service)
+        mock = factory.start()
+        self.addCleanup(factory.stop)
+        return mock, service
+
     def test_openrouter_enriches_every_batch(self):
         candidates = [bw.Candidate(f"Book {number}", ["A. Writer"]) for number in range(13)]
         for candidate in candidates:
             candidate.score = 1
-        responses = []
-        for batch in (candidates[:12], candidates[12:]):
-            content = json.dumps({"items": [{"id": item.key, "fit_score": 80} for item in batch]})
-            responses.append({"choices": [{"message": {"content": content}}], "model": "test-model"})
+        replies = [json.dumps({"items": [{"id": item.key, "fit_score": 80} for item in batch]})
+                   for batch in (candidates[:12], candidates[12:])]
+        factory, service = self.shared(*replies)
         config = {
             "openrouter": {"enabled": True, "api_key_env": "BOOK_WATCH_TEST_AI_KEY", "model": "test-model"},
             "taste": {},
         }
-        with patch.dict(os.environ, {"BOOK_WATCH_TEST_AI_KEY": "test-key"}), patch.object(
-            bw, "open_json_with_deadline", side_effect=responses
-        ) as request:
+        with patch.dict(os.environ, {"BOOK_WATCH_TEST_AI_KEY": "test-key"}):
             catalog = bw.build_catalog([{"title": "Owned", "authors": "A. Writer", "tags": ["Science Fiction"]}])
             status = bw.enrich_with_openrouter(candidates, config, catalog)
-        self.assertEqual(request.call_count, 2)
+        self.assertEqual(len(service.calls), 2)
         self.assertTrue(all(candidate.ai for candidate in candidates))
         self.assertIn("13/13", status)
-        prompt = json.loads(request.call_args_list[0].args[0].data)["messages"][0]["content"]
-        self.assertIn('"top_tags": ["Science Fiction"]', prompt)
+        self.assertIn('"top_tags": ["Science Fiction"]', service.calls[0][0])
+        self.assertEqual(service.calls[0][1], {"model": "test-model", "max_completion_tokens": 2200, "max_retries": 1, "wait_for_limits": False, "temperature": 0.0})
+        provider, overrides = factory.call_args.args
+        self.assertEqual(provider, "openrouter")
+        self.assertEqual(overrides["api_key"], "test-key")
+        self.assertEqual(overrides["base_url"], "https://openrouter.ai/api/v1")
+        # A report's caps are ceilings on metered gateways, spelled as before.
+        self.assertEqual((overrides["token_param"], overrides["cap_is_ceiling"]), ("max_tokens", True))
 
     def test_openai_oauth_needs_no_api_key(self):
         candidate = bw.Candidate("Book", ["A. Writer"])
         candidate.score = 1
-        response = {"choices": [{"message": {"content": json.dumps({"items": [{"id": candidate.key, "fit_score": 80}]})}}]}
+        factory, _service = self.shared(json.dumps({"items": [{"id": candidate.key, "fit_score": 80}]}))
         config = {"openai_oauth": {"model": "gpt-5.4-mini"}, "taste": {}}
         with patch.object(bw, "ensure_openai_oauth_proxy"), patch.object(
             bw, "openai_oauth_models", return_value=["gpt-5.4-mini"]
-        ), patch.object(
-            bw, "open_json_with_deadline", return_value=response
-        ) as send:
+        ):
             status = bw.enrich_with_openrouter([candidate], config)
-        request = send.call_args.args[0]
-        self.assertEqual(request.full_url, "http://127.0.0.1:10531/v1/chat/completions")
-        self.assertIsNone(request.get_header("Authorization"))
+        provider, overrides = factory.call_args.args
+        self.assertEqual(provider, "openai-oauth")
+        self.assertEqual(overrides["base_url"], "http://127.0.0.1:10531/v1")
+        self.assertNotIn("api_key", overrides)
         self.assertIn("AI enriched 1/1", status)
 
     def test_commandcode_defaults_when_no_provider_configured(self):
         candidate = bw.Candidate("Book", ["A. Writer"])
         candidate.score = 1
-
-        def chat(model, prompt, timeout=0):
-            return json.dumps({"items": [{"id": candidate.key, "fit_score": 80}]})
-
-        adapter = {"chat": chat, "models": ["deepseek/deepseek-v4-pro"], "writing_model": "deepseek/deepseek-v4-pro"}
-        with patch.object(bw, "commandcode_adapter", return_value=adapter), patch.object(
-            bw, "open_json_with_deadline"
-        ) as send:
+        factory, service = self.shared(json.dumps({"items": [{"id": candidate.key, "fit_score": 80}]}))
+        adapter = {"models": ["deepseek/deepseek-v4-pro"], "writing_model": "deepseek/deepseek-v4-pro"}
+        with patch.object(bw, "commandcode_adapter", return_value=adapter):
             status = bw.enrich_with_openrouter([candidate], {"taste": {}})
-        # The CLI provider is the default and must never touch an HTTP gateway.
-        send.assert_not_called()
+        # The CLI provider is the default; book writer's service runs it, with no endpoint or key.
+        provider, overrides = factory.call_args.args
+        self.assertEqual(provider, "commandcode")
+        self.assertFalse({"api_key", "base_url"} & set(overrides))
+        self.assertEqual(service.calls[0][1]["model"], "deepseek/deepseek-v4-pro")
         self.assertIn("AI enriched 1/1 candidates with deepseek/deepseek-v4-pro", status)
 
     def test_commandcode_models_come_from_book_writer(self):
-        adapter = {"chat": lambda model, prompt, timeout=0: "", "models": ["deepseek/deepseek-v4-pro", "claude-sonnet-5"], "writing_model": "deepseek/deepseek-v4-pro"}
+        adapter = {"models": ["deepseek/deepseek-v4-pro", "claude-sonnet-5"], "writing_model": "deepseek/deepseek-v4-pro"}
         with patch.object(bw, "commandcode_adapter", return_value=adapter):
             status = bw.ai_providers_status({"ai": {"provider": "commandcode"}})
             models = bw.ai_provider_models({"ai": {"provider": "commandcode"}}, "commandcode")
@@ -149,60 +173,116 @@ class BookWatchTests(unittest.TestCase):
             name, _cfg, oauth = bw.resolve_ai_provider(config)
         self.assertEqual((name, oauth), ("OpenAI OAuth", True))
 
-    def test_ai_chat_routes_through_the_commandcode_adapter(self):
-        def chat(model, prompt, timeout=0):
-            return f"{model}:{prompt}"
-
-        adapter = {"chat": chat, "models": [], "writing_model": "deepseek/deepseek-v4-pro"}
+    def test_ai_chat_routes_through_the_shared_service(self):
+        factory, service = self.shared("hello back")
+        adapter = {"models": [], "writing_model": "deepseek/deepseek-v4-pro"}
         with patch.object(bw, "commandcode_adapter", return_value=adapter):
-            text = bw.ai_chat({"ai": {"provider": "commandcode"}}, "hello")
-        self.assertEqual(text, "deepseek/deepseek-v4-pro:hello")
+            text = bw.ai_chat({"ai": {"provider": "commandcode"}}, "hello", max_tokens=300)
+        self.assertEqual(text, "hello back")
+        self.assertEqual(factory.call_args.args[0], "commandcode")
+        self.assertEqual(service.calls, [("hello", {"model": "deepseek/deepseek-v4-pro", "max_completion_tokens": 300, "max_retries": 1, "wait_for_limits": False, "temperature": 0.0})])
+
+    def test_ai_chat_failure_is_empty_text(self):
+        self.shared(RuntimeError("provider down"))
+        with patch.dict(os.environ, {"HYPER_API_KEY": "k"}):
+            self.assertEqual(bw.ai_chat({"ai": {"provider": "hyper", "model": "m"}}, "hi"), "")
 
     def test_hyper_defaults_when_explicitly_configured(self):
         candidate = bw.Candidate("Book", ["A. Writer"])
         candidate.score = 1
-        response = {"choices": [{"message": {"content": json.dumps({"items": [{"id": candidate.key, "fit_score": 80}]})}}], "model": "qwen3.8-flash"}
+        factory, service = self.shared(json.dumps({"items": [{"id": candidate.key, "fit_score": 80}]}))
         with patch.dict(os.environ, {"HYPER_API_KEY": "test-key"}), patch.object(
             bw, "openai_oauth_models", return_value=["qwen3.8-flash", "kimi-k3"]
-        ), patch.object(bw, "open_json_with_deadline", return_value=response) as send:
+        ):
             status = bw.enrich_with_openrouter([candidate], {"ai": {"provider": "hyper"}, "taste": {}})
-        request = send.call_args_list[-1].args[0]
-        self.assertEqual(request.full_url, "https://hyper.charm.land/v1/chat/completions")
-        self.assertEqual(json.loads(request.data)["model"], "qwen3.8-flash")
+        provider, overrides = factory.call_args.args
+        self.assertEqual((provider, overrides["base_url"], overrides["api_key"]),
+                         ("hyper", "https://hyper.charm.land/v1", "test-key"))
+        self.assertEqual(service.calls[-1][1]["model"], "qwen3.8-flash")
         self.assertIn("AI enriched 1/1 candidates with qwen3.8-flash", status)
+
+    def test_anna_validation_uses_the_configured_provider(self):
+        import finder_ai
+
+        config = {"ai": {"provider": "hyper", "model": "m"}}
+        matches = [{"title": "Voyagers", "author": "Meg Charlton", "link": "x"},
+                   {"title": "Cooking Basics", "author": "Someone Else", "link": "y"}]
+        reply = 'Here you go:\n```json\n{"title": "Voyagers", "author": "Meg Charlton", "link": "x", "confidence_score": 91}\n```'
+        with patch.object(bw, "ai_chat", return_value=reply) as chat:
+            found = finder_ai.AIService(config, model="picked").validate_book_match("Voyagers", "Meg Charlton", matches, "", "")
+        self.assertEqual(found["link"], "x")
+        sent_config, prompt = chat.call_args.args
+        self.assertIs(sent_config, config)
+        self.assertEqual(chat.call_args.kwargs["model"], "picked")
+        self.assertIn("Voyagers", prompt)
+        self.assertNotIn("Cooking Basics", prompt)  # fuzzy pre-filter still runs first
+        with patch.object(bw, "ai_chat", return_value='{"link": "x", "confidence_score": 40}'):
+            self.assertEqual(finder_ai.AIService(config).validate_book_match("Voyagers", "Meg Charlton", matches, "", ""), {})
+        with patch.object(bw, "ai_chat", return_value=""):
+            self.assertEqual(finder_ai.AIService(config).validate_book_match("Voyagers", "Meg Charlton", matches, "", ""), {})
+        # A score the model words or writes as a decimal is read, never a crash.
+        for score, found in (("high", False), ("85.5", True), (79.9, False)):
+            reply_json = json.dumps({"link": "x", "confidence_score": score})
+            with patch.object(bw, "ai_chat", return_value=reply_json):
+                result = finder_ai.AIService(config).validate_book_match("Voyagers", "Meg Charlton", matches, "", "")
+            self.assertEqual(bool(result), found, score)
+
+    def test_finder_has_no_provider_client_of_its_own(self):
+        import finder_ai
+
+        source = Path(finder_ai.__file__).read_text(encoding="utf-8")
+        for needle in ("api_key", "requests", "api.openai.com", "chat/completions"):
+            self.assertNotIn(needle, source)
+
+    def test_ai_chat_model_override(self):
+        _factory, service = self.shared("ok")
+        with patch.dict(os.environ, {"HYPER_API_KEY": "k"}):
+            bw.ai_chat({"ai": {"provider": "hyper", "model": "configured"}}, "hi", model="chosen")
+        self.assertEqual(service.calls[0][1]["model"], "chosen")
+
+    def test_claude_section_stays_an_api_key_provider(self):
+        # book-watch's [claude] is Anthropic's API with ANTHROPIC_API_KEY, not the Claude Code
+        # CLI that book writer's "claude" provider runs, so it rides the shared OpenAI-compatible client.
+        factory, _service = self.shared("{}")
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant"}):
+            bw.ai_chat({"ai": {"provider": "claude"}}, "hi")
+        provider, overrides = factory.call_args.args
+        self.assertEqual((provider, overrides["base_url"], overrides["api_key"]),
+                         ("openrouter", "https://api.anthropic.com/v1", "sk-ant"))
 
     def test_html_model_choice_overrides_config(self):
         candidate = bw.Candidate("Book", ["A. Writer"])
         candidate.score = 1
-        response = {"choices": [{"message": {"content": json.dumps({"items": [{"id": candidate.key, "fit_score": 80}]})}}], "model": "kimi-k3"}
+        _factory, service = self.shared(json.dumps({"items": [{"id": candidate.key, "fit_score": 80}]}))
         config = {"_ai_provider": "hyper", "_ai_model": "kimi-k3", "taste": {}}
         with patch.dict(os.environ, {"HYPER_API_KEY": "test-key"}), patch.object(
             bw, "openai_oauth_models", return_value=["qwen3.8-flash", "kimi-k3"]
-        ), patch.object(bw, "open_json_with_deadline", return_value=response) as send:
+        ):
             bw.enrich_with_openrouter([candidate], config)
-        self.assertEqual(json.loads(send.call_args_list[-1].args[0].data)["model"], "kimi-k3")
+        self.assertEqual(service.calls[-1][1]["model"], "kimi-k3")
 
     def test_unknown_model_for_a_gateway_is_rejected(self):
         candidate = bw.Candidate("Book", ["A. Writer"])
         candidate.score = 1
+        factory, _service = self.shared()
         config = {"_ai_provider": "hyper", "_ai_model": "not-a-model", "taste": {}}
         with patch.dict(os.environ, {"HYPER_API_KEY": "test-key"}), patch.object(
             bw, "openai_oauth_models", return_value=["qwen3.8-flash"]
-        ), patch.object(bw, "open_json_with_deadline") as send:
+        ):
             status = bw.enrich_with_openrouter([candidate], config)
-        send.assert_not_called()
+        factory.assert_not_called()
         self.assertIn("does not offer: not-a-model", status)
 
     def test_hyper_falls_back_to_article_writer_key(self):
         candidate = bw.Candidate("Book", ["A. Writer"])
         candidate.score = 1
-        response = {"choices": [{"message": {"content": json.dumps({"items": [{"id": candidate.key, "fit_score": 80}]})}}], "model": "qwen3.8-flash"}
+        factory, _service = self.shared(json.dumps({"items": [{"id": candidate.key, "fit_score": 80}]}))
         os.environ.pop("HYPER_API_KEY", None)
         with patch.dict(os.environ, {"AW_API_KEY": "article-writer-key"}), patch.object(
             bw, "openai_oauth_models", return_value=["qwen3.8-flash"]
-        ), patch.object(bw, "open_json_with_deadline", return_value=response) as send:
+        ):
             status = bw.enrich_with_openrouter([candidate], {"ai": {"provider": "hyper"}, "taste": {}})
-        self.assertEqual(send.call_args_list[-1].args[0].get_header("Authorization"), "Bearer article-writer-key")
+        self.assertEqual(factory.call_args.args[1]["api_key"], "article-writer-key")
         self.assertIn("AI enriched 1/1", status)
 
     def test_hyper_falls_back_to_the_crush_login_key(self):
@@ -218,13 +298,13 @@ class BookWatchTests(unittest.TestCase):
     def test_ai_section_provider_beats_the_oauth_section(self):
         candidate = bw.Candidate("Book", ["A. Writer"])
         candidate.score = 1
-        response = {"choices": [{"message": {"content": json.dumps({"items": [{"id": candidate.key, "fit_score": 80}]})}}], "model": "qwen3.8-flash"}
+        factory, _service = self.shared(json.dumps({"items": [{"id": candidate.key, "fit_score": 80}]}))
         config = {"ai": {"provider": "hyper"}, "openai_oauth": {"model": "gpt-5.4-mini"}, "taste": {}}
         with patch.dict(os.environ, {"HYPER_API_KEY": "test-key"}), patch.object(
             bw, "openai_oauth_models", return_value=["qwen3.8-flash"]
-        ), patch.object(bw, "open_json_with_deadline", return_value=response) as send:
+        ):
             bw.enrich_with_openrouter([candidate], config)
-        self.assertEqual(send.call_args_list[-1].args[0].full_url, "https://hyper.charm.land/v1/chat/completions")
+        self.assertEqual(factory.call_args.args[0], "hyper")
 
     def test_missing_api_key_names_the_env_var(self):
         # Every provider key must be gone, or the key fallback picks another
@@ -268,12 +348,38 @@ class BookWatchTests(unittest.TestCase):
             },
             "taste": {},
         }
-        with patch.dict(os.environ, {"BOOK_WATCH_TEST_AI_KEY": "test-key"}), patch.object(
-            bw, "open_json_with_deadline", side_effect=TimeoutError("slow")
-        ) as request:
+        _factory, service = self.shared(TimeoutError("slow"), TimeoutError("slow"), TimeoutError("slow"))
+        with patch.dict(os.environ, {"BOOK_WATCH_TEST_AI_KEY": "test-key"}):
             status = bw.enrich_with_openrouter([candidate], config)
-        self.assertEqual(request.call_count, 3)
+        self.assertEqual([kwargs["model"] for _prompt, kwargs in service.calls],
+                         ["strong-primary", "strong-fallback", "strong-primary"])
         self.assertIn("AI unavailable", status)
+
+    def test_book_watch_sends_no_completion_requests_itself(self):
+        source = Path(bw.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("/chat/completions", source)
+
+    def test_shared_service_is_book_writers_and_cached(self):
+        built = []
+
+        class Service:
+            def __init__(self, **kwargs):
+                built.append(kwargs)
+
+        module = type("M", (), {"AIService": Service})
+        with patch.object(bw, "book_writer_ai", return_value=module), patch.object(
+            bw, "book_writer_config_path", side_effect=lambda name: f"/cfg/{name}.json"
+        ), patch.dict(bw._shared_services, clear=True):
+            first = bw.shared_ai_service("hyper", {"api_key": "k", "timeout": 120})
+            again = bw.shared_ai_service("hyper", {"api_key": "k", "timeout": 120})
+            other = bw.shared_ai_service("hyper", {"api_key": "k2", "timeout": 120})
+        self.assertIs(first, again)
+        self.assertIsNot(first, other)
+        self.assertEqual(len(built), 2)
+        self.assertEqual(built[0]["config_path"], "/cfg/hyper.json")
+        self.assertEqual(built[0]["config_overrides"], {"api_key": "k", "timeout": 120})
+        self.assertFalse(built[0]["allow_auth_prompt"])
+        self.assertEqual(built[0]["client_max_retries"], 0)
 
     def test_reactor_series_line(self):
         parser = bw.BlockParser()
