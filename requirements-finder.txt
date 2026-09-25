@@ -1,0 +1,2 @@
+# Optional Anna lookup only; book-watch, CSV import and export use the stdlib.
+requests>=2.0

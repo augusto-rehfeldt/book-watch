@@ -1,5 +1,8 @@
 [library]
-path = ".."
+# Must be the Calibre library folder itself (the one holding metadata.db). Pointing it
+# at anything else makes calibredb create an empty library there, and every run then
+# reports zero owned books: no series continuations, no author matches, all discovery.
+path = "C:/Users/Augusto/Calibre Library"
 calibredb = "calibredb"
 snapshot = "data/library.json"
 
@@ -8,6 +11,11 @@ past_days = 550
 future_days = 0
 authors_per_run = 8
 min_owned_books = 2
+# Owned series are rotated like authors: this many per run, least recently checked
+# first, newest volume first. Without it a continuation only turned up when an author
+# or subject query happened to return it.
+series_per_run = 24
+min_series_books = 2
 
 [watch]
 # These are always checked. With an empty list, the normal run also rotates
@@ -43,6 +51,23 @@ reactor_genres = ["science-fiction", "fantasy", "horror"]
 reactor_months_back = 6
 reactor_months_forward = 1
 cache_hours = 24
+# How many of a source's queries (and cover lookups) run at once. The five
+# sources themselves always run concurrently; Mobilism stays serial inside its
+# task because the forum login is shared.
+query_workers = 4
+
+[download]
+# `book_watch.py download` searches Library Genesis, saves the file here and adds
+# it to Calibre with the candidate's metadata. Formats are tried in this order.
+dir = "downloads"
+formats = ["epub", "azw3", "mobi", "fb2", "pdf"]
+max_mb = 200
+# Share of the wanted title's words a libgen row must carry to be accepted.
+min_title_match = 0.6
+# When nothing matches, ask the AI for other titles the same book is filed under
+# (retitle, original language, subtitle dropped) and search again. `download --no-ai`
+# turns it off for one command.
+ai_assist = true
 
 [google_books]
 api_key_env = "GOOGLE_BOOKS_API_KEY"
@@ -55,10 +80,74 @@ contact_email = ""
 [hardcover]
 token_env = "HARDCOVER_API_TOKEN"
 
-[openrouter]
+[mobilism]
+# Adds a link to the forum topic for a release. Guests cannot search the forum, so
+# both env vars must be set in .env or the step reports itself as skipped.
 enabled = true
+# The forum is also searched for the run's owned series and authors, and its release
+# topics become candidates. It indexes the indie serials that Google Books and Open
+# Library barely carry, which is where most missed continuations were hiding.
+discover = true
+# Also open each owned series' bundle topic and read its volume list: anything past the
+# newest volume in Calibre is reported as a continuation. One extra page per series.
+series_topics = true
+# With download = true, `download` falls back to the topic's file-host mirrors when
+# Library Genesis has nothing. That needs Playwright (pip) and Google Chrome: the
+# mirrors are gated by a Cloudflare Turnstile widget that only a real, headed Chrome
+# gets a token for, so a Chrome window opens off-screen for a minute per book.
+download = true
+chrome = ""             # path to chrome.exe; empty = look in the usual places
+# Try headless Chrome first so no window appears. Turnstile has never issued a token to
+# one, so the headed attempt (parked off-screen) still runs when headless comes back
+# empty; set headless_first = false to skip straight to it.
+headless_first = true
+headless_seconds = 45
+username_env = "MOBILISM_USERNAME"
+password_env = "MOBILISM_PASSWORD"
+forum_id = 106          # eBooks
+max_lookups = 40        # one search each, throttled to one every 3s
+cache_hours = 168
+min_title_match = 0.6
+
+# Choose the AI ranking provider here or per run with `run --ai <name>`; the served
+# report also has a provider/model picker. Providers: commandcode (default), hyper,
+# opencode (Zen gateway), claude, openrouter, openai_oauth. Each HTTP section below is
+# optional and overrides base_url / model / fallback_model / timeout_seconds for it.
+[ai]
+provider = "commandcode"
+
+# Command Code CLI — the same adapter book writer's AI service uses: it runs
+# `cmdc -p --output-format text --model <model>`, authenticated by your own
+# Command Code login, so there is no key or endpoint. The model list comes from
+# book writer's ai_config_commandcode.json. Unset model = that config's
+# writing_model (deepseek/deepseek-v4-pro).
+[commandcode]
+# model = "claude-sonnet-5"
+timeout_seconds = 1800
+
+# Charm's Hyper gateway, the one Crush talks to. With no HYPER_API_KEY/AW_API_KEY in
+# .env, the key Crush stored at login (crush.json) is used.
+[hyper]
+model = "qwen3.8-flash"
+base_url = "https://hyper.charm.land/v1"
+api_key_env = "HYPER_API_KEY"
+timeout_seconds = 120
+
+[opencode]
+model = "claude-sonnet-5"
+base_url = "https://opencode.ai/zen/v1"
+api_key_env = "OPENCODE_API_KEY"
+
+[claude]
+model = "claude-sonnet-5"
+base_url = "https://api.anthropic.com/v1"
+api_key_env = "ANTHROPIC_API_KEY"
+
+[openrouter]
 api_key_env = "OPENROUTER_API_KEY"
-model = "nvidia/nemotron-3-ultra-550b-a55b:free"
-fallback_model = "nvidia/nemotron-3-super-120b-a12b:free"
-base_url = "https://openrouter.ai/api/v1"
-timeout_seconds = 45
+
+[openai_oauth]
+enabled = true
+model = "gpt-5.6-terra"
+base_url = "http://127.0.0.1:10531/v1"
+timeout_seconds = 120

@@ -3,3 +3,10 @@ reports/
 __pycache__/
 *.pyc
 .env
+downloads/
+api_key.txt
+.missing_books_path
+found_books_validated.txt
+.pytest_cache/
+.venv/
+*.tmp
