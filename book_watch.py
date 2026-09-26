@@ -4740,7 +4740,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command")
     missing = sub.add_parser('import-missing', help='Import a missing-book CSV/XLSX into the shared candidate history')
     missing.add_argument('input_file', type=Path)
-    atlas = sub.add_parser('export-atlas', help='Export Calibre metadata and summaries to Story Atlas CSV (read-only)')
+    atlas = sub.add_parser('export-atlas', help='Export Calibre metadata and summaries to Shelfscape CSV (read-only)')
     atlas.add_argument('--output', required=True, type=Path)
     atlas.add_argument('--summary-column', default='#summary')
     sub.add_parser('lookup', help='Anna lookup; use lookup --help for its options', add_help=False)

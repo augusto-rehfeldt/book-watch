@@ -215,7 +215,7 @@ never overwritten; numbered filenames preserve them.
 `export-atlas` reads the configured Calibre library directly, supports normalized
 text and comments-style custom columns, and writes stable IDs, summary/comment text,
 authors, series and cover paths. Override `--summary-column '#your_column'` if needed.
-From Story Atlas, run `python backend/app.py --stories ../book-watch/data/atlas`.
+From Shelfscape, run `python backend/app.py --stories ../book-watch/data/atlas`.
 The export is local and read-only with respect to Calibre. `run --like ID` focuses
 release discovery on the authors/series of that Calibre book.
 
