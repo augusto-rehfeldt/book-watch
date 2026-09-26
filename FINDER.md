@@ -1,7 +1,7 @@
 # Anna lookup (formerly book_finder)
 
 A small book lookup pipeline for matching a CSV of missing books against Anna's Archive and validating the best candidate with book-watch's configured AI provider
-(book writer's shared AIService, like every AI script in the workspace).
+(ai-suite's shared AIService, like every AI script in the workspace).
 
 ## What it does
 
@@ -16,7 +16,7 @@ A small book lookup pipeline for matching a CSV of missing books against Anna's 
 - Python 3.10+
 - `requests`
 - book-watch's AI provider configured (default Command Code; see book-watch's README)
-- The sibling `book writer` project (or `BOOK_WATCH_BOOK_WRITER`)
+- The sibling `ai-suite` checkout (or `AI_SUITE_DIR`; a clone falls back to its vendored `ai_suite/`)
 
 Install dependencies:
 

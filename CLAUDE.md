@@ -19,7 +19,7 @@ Builds a local HTML report of new releases matching your Calibre library + chose
 
 ## Gotchas
 - **The AI default is `commandcode`, a CLI provider, not an HTTP gateway.** It runs
-  `cmdc -p --output-format text --model <model>` through **book writer's AIService**
+  `cmdc -p --output-format text --model <model>` through **ai-suite's AIService**
   (its commandcode provider; `commandcode_adapter()` only checks the CLI is installed and
   reads `ai_config_commandcode.json` for the model list). Auth is the user's Command Code
   login; `ai_key()` returns a sentinel for `cli:` providers so `resolve_ai_provider`
@@ -28,12 +28,13 @@ Builds a local HTML report of new releases matching your Calibre library + chose
   opencode/OAuth exactly as before and never starts shelling out to `cmdc`; and in
   tests `commandcode_adapter` and `shared_ai_service` must be patched, or a test will
   invoke the real CLI and hang for tens of seconds. The report's provider picker defaults to it
-  and its model list comes from book writer's config, not a `/models` call.
-- **Every AI completion runs on book writer's AIService** (the workspace's one AI suite;
-  `BOOK_WATCH_BOOK_WRITER` overrides its location, imported as the `ai_book_creator` package).
+  and its model list comes from ai-suite's config, not a `/models` call.
+- **Every AI completion runs on the shared ai-suite AIService** (the workspace's one AI suite:
+  sibling `ai-suite` checkout, `AI_SUITE_DIR` overrides it, else the vendored `ai_suite/` copy
+  synced by ai-suite's `sync.py` -- never edit it here).
   Book-watch keeps what is its own: provider choice (`--ai`, `[ai] provider`), key discovery
   (env, `AW_API_KEY`, Crush, opencode auth), fallback order and model validation.
-  `ai_completion()` then maps the provider onto book writer's (`SHARED_PROVIDERS`; `[claude]`
+  `ai_completion()` then maps the provider onto ai-suite's (`SHARED_PROVIDERS`; `[claude]`
   is Anthropic's API on the generic OpenAI-compatible client, not the Claude Code CLI) and
   `shared_ai_service()` builds one cached service per key/endpoint/timeout via
   `config_overrides`. Calls use `max_retries=1, wait_for_limits=False`: a report fails fast

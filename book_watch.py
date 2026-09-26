@@ -1795,9 +1795,9 @@ def open_json_with_deadline(request: Request, timeout: int) -> dict[str, Any]:
 
 
 def ensure_openai_oauth_proxy() -> None:
-    """Start the local OpenAI OAuth proxy via book writer's shared helper."""
+    """Start the local OpenAI OAuth proxy via ai-suite's shared helper."""
     try:
-        start = book_writer_ai().ensure_openai_oauth_proxy
+        start = suite_ai().ensure_openai_oauth_proxy
     except Exception as exc:  # noqa: BLE001 - surfaced like any other proxy failure
         raise RuntimeError(f"OpenAI OAuth unavailable: {redact_secrets(exc)}") from exc
     start()
@@ -1828,17 +1828,17 @@ AI_PROVIDERS: dict[str, dict[str, Any]] = {
     "opencode": {"base_url": "https://opencode.ai/zen/v1", "api_key_env": "OPENCODE_API_KEY", "opencode_auth_file": True, "default_model": "claude-sonnet-5", "live_models": True},
     "claude": {"base_url": "https://api.anthropic.com/v1", "api_key_env": "ANTHROPIC_API_KEY", "default_model": "claude-sonnet-5"},
     "openrouter": {"base_url": "https://openrouter.ai/api/v1", "api_key_env": "OPENROUTER_API_KEY", "default_model": None, "live_models": True},
-    # CLI provider, not an HTTP gateway: runs `cmdc -p` through book writer's
+    # CLI provider, not an HTTP gateway: runs `cmdc -p` through ai-suite's
     # adapter with the user's Command Code plan auth. No key, no endpoint.
     "commandcode": {"cli": True, "default_model": "deepseek/deepseek-v4-pro", "timeout_seconds": 1800},
 }
 
 
 def opencode_auth_key() -> str:
-    """The Zen key opencode's CLI stored at login, read by book writer's shared helper."""
+    """The Zen key opencode's CLI stored at login, read by ai-suite's shared helper."""
     try:
-        return str(book_writer_ai().load_opencode_go_sync().get("api_key") or "")
-    except Exception:  # noqa: BLE001 - no auth file or no book writer is just no fallback
+        return str(suite_ai().load_opencode_go_sync().get("api_key") or "")
+    except Exception:  # noqa: BLE001 - no auth file or no ai-suite is just no fallback
         return ""
 
 
@@ -1876,7 +1876,7 @@ def crush_auth_key(provider: str) -> str:
 
 def ai_key(ai_cfg: dict[str, Any]) -> str:
     if ai_cfg.get("cli"):
-        # The CLI carries the user's own Command Code plan auth — book writer's
+        # The CLI carries the user's own Command Code plan auth — ai-suite's
         # convention — so a CLI provider is always "usable" without a key.
         return "commandcode-cli"
     for env_name in [ai_cfg.get("api_key_env"), *(ai_cfg.get("key_fallbacks") or [])]:
@@ -1889,36 +1889,39 @@ def ai_key(ai_cfg: dict[str, Any]) -> str:
     return ""
 
 
-BOOK_WRITER_DIR = Path(os.getenv("BOOK_WATCH_BOOK_WRITER") or (Path(__file__).resolve().parent.parent / "book writer"))
-_book_writer: dict[str, Any] = {}
-_book_writer_lock = threading.Lock()
+# The shared ai-suite package: the sibling checkout when present (AI_SUITE_DIR overrides
+# it), else the copy vendored into this repository.
+AI_SUITE = Path(os.getenv("AI_SUITE_DIR") or (Path(__file__).resolve().parent.parent / "ai-suite"))
+SUITE_PATH = AI_SUITE if AI_SUITE.is_dir() else Path(__file__).resolve().parent
+_suite: dict[str, Any] = {}
+_suite_lock = threading.Lock()
 _commandcode_adapter: dict[str, Any] = {}
 
 
-def _book_writer_package(name: str) -> Any:
-    """A module of book writer's ai_book_creator package -- the shared AI suite every
-    workspace AI script uses. Raises when book writer is absent."""
-    with _book_writer_lock:  # report-server threads may ask at once
-        if name not in _book_writer:
-            if str(BOOK_WRITER_DIR) not in sys.path:
-                sys.path.insert(0, str(BOOK_WRITER_DIR))
-            _book_writer[name] = importlib.import_module(name)
-        return _book_writer[name]
+def _suite_module(name: str) -> Any:
+    """A module of the shared ai_suite package -- the AI suite every workspace AI
+    script uses. Raises when neither the checkout nor the vendored copy is there."""
+    with _suite_lock:  # report-server threads may ask at once
+        if name not in _suite:
+            if str(SUITE_PATH) not in sys.path:
+                sys.path.insert(0, str(SUITE_PATH))
+            _suite[name] = importlib.import_module(name)
+        return _suite[name]
 
 
-def book_writer_ai() -> Any:
-    """book writer's ai_service module (AIService, OAuth proxy and auth helpers)."""
-    return _book_writer_package("ai_book_creator.services.ai_service")
+def suite_ai() -> Any:
+    """ai-suite's service module (AIService, OAuth proxy and auth helpers)."""
+    return _suite_module("ai_suite.service")
 
 
-def book_writer_config_path(provider: str) -> str:
-    """book writer's config file for one of its providers (its .local.json copy first)."""
-    return _book_writer_package("ai_book_creator.cli").provider_config_path(provider)
+def suite_config_path(provider: str) -> str:
+    """ai-suite's config file for one of its providers (its .local.json copy first)."""
+    return _suite_module("ai_suite.providers").provider_config_path(provider)
 
 
-# book-watch's provider names -> book writer's. Book-watch keeps choosing the provider,
+# book-watch's provider names -> ai-suite's. Book-watch keeps choosing the provider,
 # finding its key (env, AW_API_KEY, Crush, opencode auth) and validating models; every
-# completion then runs through book writer's AIService like the rest of the workspace.
+# completion then runs through ai-suite's AIService like the rest of the workspace.
 SHARED_PROVIDERS = {
     "hyper": "hyper",
     "opencode": "opencode-zen",
@@ -1935,21 +1938,21 @@ _shared_services: dict[tuple, Any] = {}
 
 
 def shared_ai_service(provider: str, overrides: dict[str, Any]) -> Any:
-    """book writer's AIService for `provider` with book-watch's key/endpoint/timeout.
+    """ai-suite's AIService for `provider` with book-watch's key/endpoint/timeout.
     One instance per distinct setting, reused across batches and report requests."""
     cache_key = (provider, tuple(sorted(overrides.items())))
-    with _book_writer_lock:
+    with _suite_lock:
         cached = _shared_services.get(cache_key)
     if cached is not None:
         return cached
-    service = book_writer_ai().AIService(
-        config_path=book_writer_config_path(provider),
+    service = suite_ai().AIService(
+        config_path=suite_config_path(provider),
         usage_state_path=str(Path(__file__).resolve().parent / "data" / "ai_usage.json"),
         allow_auth_prompt=False,
         client_max_retries=0,
         config_overrides=dict(overrides),
     )
-    with _book_writer_lock:
+    with _suite_lock:
         return _shared_services.setdefault(cache_key, service)
 
 
@@ -1970,13 +1973,13 @@ def ai_completion(provider_name: str, ai_cfg: dict[str, Any], key: str, base_url
 
 
 def commandcode_adapter() -> dict[str, Any]:
-    """book writer's Command Code model list and CLI check, so the report's picker
-    offers what book writer's commandcode config serves. Cached; carries
+    """ai-suite's Command Code model list and CLI check, so the report's picker
+    offers what ai-suite's commandcode config serves. Cached; carries
     {"error": ...} when the module or the CLI is unavailable."""
     if not _commandcode_adapter:
         try:
-            module = book_writer_ai()
-            config_path = Path(book_writer_config_path("commandcode"))
+            module = suite_ai()
+            config_path = Path(suite_config_path("commandcode"))
             config = json.loads(config_path.read_text(encoding="utf-8"))
             module.commandcode_executable()
             _commandcode_adapter.update(
@@ -2443,7 +2446,7 @@ def ai_providers_status(config: dict[str, Any]) -> dict[str, Any]:
         status[name] = {"models": [default_model] if default_model else [], "error": "", "live": bool(spec.get("live_models"))}
         if spec.get("cli"):
             # Offline like everything else here, but the static model list comes
-            # from book writer's commandcode config instead of the one default.
+            # from ai-suite's commandcode config instead of the one default.
             adapter = commandcode_adapter()
             if "error" in adapter:
                 status[name]["error"] = str(adapter["error"])[:200]
@@ -2461,7 +2464,7 @@ def ai_provider_models(config: dict[str, Any], name: str) -> dict[str, Any]:
     section = config.get(name) if isinstance(config.get(name), dict) else {}
     default_model = str(section.get("model") or spec.get("default_model") or "")
     if spec.get("cli"):
-        # No endpoint to query: the list is book writer's commandcode config.
+        # No endpoint to query: the list is ai-suite's commandcode config.
         adapter = commandcode_adapter()
         if "error" in adapter:
             return {"models": [default_model] if default_model else [], "error": str(adapter["error"])[:200], "live": False}

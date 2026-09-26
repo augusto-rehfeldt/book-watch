@@ -116,10 +116,10 @@ min_title_match = 0.6
 [ai]
 provider = "commandcode"
 
-# Command Code CLI — the same adapter book writer's AI service uses: it runs
+# Command Code CLI — the same adapter ai-suite's AI service uses: it runs
 # `cmdc -p --output-format text --model <model>`, authenticated by your own
 # Command Code login, so there is no key or endpoint. The model list comes from
-# book writer's ai_config_commandcode.json. Unset model = that config's
+# ai-suite's ai_config_commandcode.json. Unset model = that config's
 # writing_model (deepseek/deepseek-v4-pro).
 [commandcode]
 # model = "claude-sonnet-5"

@@ -17,7 +17,7 @@ import book_watch as bw
 
 
 class FakeService:
-    """Stands in for book writer's AIService: replays replies, records calls."""
+    """Stands in for ai-suite's AIService: replays replies, records calls."""
 
     def __init__(self, replies):
         self.replies = list(replies)
@@ -91,7 +91,7 @@ class BookWatchTests(unittest.TestCase):
                 bw.open_json_with_deadline(object(), 0.01)
 
     def shared(self, *replies):
-        """Patch book writer's AIService factory; returns (factory mock, fake service)."""
+        """Patch ai-suite's AIService factory; returns (factory mock, fake service)."""
         service = FakeService(replies)
         factory = patch.object(bw, "shared_ai_service", return_value=service)
         mock = factory.start()
@@ -146,14 +146,14 @@ class BookWatchTests(unittest.TestCase):
         adapter = {"models": ["deepseek/deepseek-v4-pro"], "writing_model": "deepseek/deepseek-v4-pro"}
         with patch.object(bw, "commandcode_adapter", return_value=adapter):
             status = bw.enrich_with_openrouter([candidate], {"taste": {}})
-        # The CLI provider is the default; book writer's service runs it, with no endpoint or key.
+        # The CLI provider is the default; ai-suite's service runs it, with no endpoint or key.
         provider, overrides = factory.call_args.args
         self.assertEqual(provider, "commandcode")
         self.assertFalse({"api_key", "base_url"} & set(overrides))
         self.assertEqual(service.calls[0][1]["model"], "deepseek/deepseek-v4-pro")
         self.assertIn("AI enriched 1/1 candidates with deepseek/deepseek-v4-pro", status)
 
-    def test_commandcode_models_come_from_book_writer(self):
+    def test_commandcode_models_come_from_the_suite(self):
         adapter = {"models": ["deepseek/deepseek-v4-pro", "claude-sonnet-5"], "writing_model": "deepseek/deepseek-v4-pro"}
         with patch.object(bw, "commandcode_adapter", return_value=adapter):
             status = bw.ai_providers_status({"ai": {"provider": "commandcode"}})
@@ -242,7 +242,7 @@ class BookWatchTests(unittest.TestCase):
 
     def test_claude_section_stays_an_api_key_provider(self):
         # book-watch's [claude] is Anthropic's API with ANTHROPIC_API_KEY, not the Claude Code
-        # CLI that book writer's "claude" provider runs, so it rides the shared OpenAI-compatible client.
+        # CLI that ai-suite's "claude" provider runs, so it rides the shared OpenAI-compatible client.
         factory, _service = self.shared("{}")
         with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant"}):
             bw.ai_chat({"ai": {"provider": "claude"}}, "hi")
@@ -325,7 +325,7 @@ class BookWatchTests(unittest.TestCase):
         self.assertEqual(models, ["gpt-5.6-sol", "gpt-5.4-mini"])
 
     def test_starts_missing_oauth_proxy_with_npx(self):
-        shared = bw.book_writer_ai()  # the proxy starter is book writer's, shared across the workspace
+        shared = bw.suite_ai()  # the proxy starter is ai-suite's, shared across the workspace
         with patch.object(shared, "_openai_oauth_proxy_running", side_effect=[False, True]), patch.object(
             shared.shutil, "which", return_value="npx"
         ), patch.object(shared.subprocess, "run") as run:
@@ -359,7 +359,7 @@ class BookWatchTests(unittest.TestCase):
         source = Path(bw.__file__).read_text(encoding="utf-8")
         self.assertNotIn("/chat/completions", source)
 
-    def test_shared_service_is_book_writers_and_cached(self):
+    def test_shared_service_is_the_suites_and_cached(self):
         built = []
 
         class Service:
@@ -367,8 +367,8 @@ class BookWatchTests(unittest.TestCase):
                 built.append(kwargs)
 
         module = type("M", (), {"AIService": Service})
-        with patch.object(bw, "book_writer_ai", return_value=module), patch.object(
-            bw, "book_writer_config_path", side_effect=lambda name: f"/cfg/{name}.json"
+        with patch.object(bw, "suite_ai", return_value=module), patch.object(
+            bw, "suite_config_path", side_effect=lambda name: f"/cfg/{name}.json"
         ), patch.dict(bw._shared_services, clear=True):
             first = bw.shared_ai_service("hyper", {"api_key": "k", "timeout": 120})
             again = bw.shared_ai_service("hyper", {"api_key": "k", "timeout": 120})
