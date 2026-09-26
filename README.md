@@ -78,6 +78,8 @@ fallback reports itself as skipped and nothing else changes.
 
 ## Commands
 
+`python book_watch.py --config <path> <command>` uses a `config.toml` other than the default (the flag goes before the command).
+
 ```powershell
 # Normal report
 python book_watch.py run
@@ -92,6 +94,10 @@ python book_watch.py run --focused --author "Adrian Tchaikovsky" --series "Child
 # Disable AI, or run entirely from cached/local data
 python book_watch.py run --no-ai
 python book_watch.py run --no-network --no-ai
+
+# Pick the AI provider for ranking, or widen the rotation of owned authors/series
+python book_watch.py run --ai claude
+python book_watch.py run --max-authors 40 --max-series 20
 
 # Ignore the HTTP cache for this run
 python book_watch.py run --refresh
@@ -116,7 +122,7 @@ python book_watch.py download work:0123456789abcdef
 python book_watch.py download --all-keeps
 
 # List what has already been downloaded
-python book_watch.py download --list
+python book_watch.py download --list --limit 100
 
 # Re-run the Calibre import for downloads whose file was saved but not imported
 python book_watch.py retry-imports
