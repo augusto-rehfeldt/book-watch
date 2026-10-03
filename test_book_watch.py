@@ -295,6 +295,11 @@ class BookWatchTests(unittest.TestCase):
             with patch.dict(os.environ, {"LOCALAPPDATA": folder}):
                 self.assertEqual(bw.ai_key(bw.AI_PROVIDERS["hyper"]), "crush-key")
 
+    def test_claude_defaults_to_the_newest_sonnet(self):
+        self.assertEqual(bw.AI_PROVIDERS["claude"]["default_model"], "claude-sonnet-5-5")
+        config = (Path(__file__).parent / "config.toml").read_text(encoding="utf-8")
+        self.assertIn('[claude]\nmodel = "claude-sonnet-5-5"', config)
+
     def test_ai_section_provider_beats_the_oauth_section(self):
         candidate = bw.Candidate("Book", ["A. Writer"])
         candidate.score = 1
@@ -330,7 +335,8 @@ class BookWatchTests(unittest.TestCase):
             shared.shutil, "which", return_value="npx"
         ), patch.object(shared.subprocess, "run") as run:
             bw.ensure_openai_oauth_proxy()
-        run.assert_called_once_with(["npx", "openai-oauth@latest", "--detach"], check=True)
+        flags = {"creationflags": shared.subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
+        run.assert_called_once_with(["npx", "openai-oauth@latest", "--detach"], check=True, **flags)
 
     def test_genre_option_is_repeatable(self):
         args = bw.build_parser().parse_args(["run", "--genre", "cozy fantasy", "-g", "mystery"])

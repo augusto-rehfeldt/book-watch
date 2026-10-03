@@ -1826,7 +1826,7 @@ def openai_oauth_models(base_url: str, key: str = "") -> list[str]:
 AI_PROVIDERS: dict[str, dict[str, Any]] = {
     "hyper": {"base_url": "https://hyper.charm.land/v1", "api_key_env": "HYPER_API_KEY", "key_fallbacks": ["AW_API_KEY"], "crush_auth_provider": "hyper", "default_model": "qwen3.8-flash", "live_models": True},
     "opencode": {"base_url": "https://opencode.ai/zen/v1", "api_key_env": "OPENCODE_API_KEY", "opencode_auth_file": True, "default_model": "claude-sonnet-5", "live_models": True},
-    "claude": {"base_url": "https://api.anthropic.com/v1", "api_key_env": "ANTHROPIC_API_KEY", "default_model": "claude-sonnet-5"},
+    "claude": {"base_url": "https://api.anthropic.com/v1", "api_key_env": "ANTHROPIC_API_KEY", "default_model": "claude-sonnet-5-5"},
     "openrouter": {"base_url": "https://openrouter.ai/api/v1", "api_key_env": "OPENROUTER_API_KEY", "default_model": None, "live_models": True},
     # CLI provider, not an HTTP gateway: runs `cmdc -p` through ai-suite's
     # adapter with the user's Command Code plan auth. No key, no endpoint.
